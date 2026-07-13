@@ -75,11 +75,26 @@ export function skipCurrentStation(state: TrainSimulationState, routeId = DEFAUL
   if (!nextStationId) {
     return { ...state, mode: "completed", progressOnSegment: 1, pendingQuestion: emptyPendingQuestion(), pausedFrom: undefined };
   }
+  const followingStationId = getNextStationId(routeId, nextStationId);
+  if (!followingStationId) {
+    return {
+      ...state,
+      mode: "completed",
+      currentStationId: nextStationId,
+      nextStationId: undefined,
+      segmentIndex: state.segmentIndex + 1,
+      progressOnSegment: 1,
+      stationNarrationIndex: 0,
+      pendingQuestion: emptyPendingQuestion(),
+      pausedFrom: undefined
+    };
+  }
 
   return {
     ...state,
     mode: "running_between_stations",
-    nextStationId,
+    currentStationId: nextStationId,
+    nextStationId: followingStationId,
     segmentIndex: state.segmentIndex + 1,
     progressOnSegment: 0,
     stationNarrationIndex: 0,

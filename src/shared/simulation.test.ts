@@ -21,21 +21,21 @@ describe("train simulation", () => {
     expect(completeCurrentNarrationSegment(state).mode).toBe("answering_pending_question");
   });
 
-  it("can skip a station narration and keep the train moving to the next station", () => {
+  it("can jump to the next station and keep moving forward", () => {
     const state = { ...createInitialSimulation("tra-pingxi", true), mode: "narrating_station" as const };
     const skipped = skipCurrentStation(state);
 
     expect(skipped.mode).toBe("running_between_stations");
-    expect(skipped.currentStationId).toBe("ruifang");
-    expect(skipped.nextStationId).toBe("houtong");
+    expect(skipped.currentStationId).toBe("houtong");
+    expect(skipped.nextStationId).toBe("sandiaoling");
   });
 
-  it("keeps moving when skip is pressed while already moving", () => {
+  it("jumps to the upcoming stop when skip is pressed while already moving", () => {
     const state = startSimulation(createInitialSimulation("tra-pingxi", true));
     const skipped = skipCurrentStation(state);
 
     expect(skipped.mode).toBe("running_between_stations");
-    expect(skipped.currentStationId).toBe("ruifang");
-    expect(skipped.nextStationId).toBe("houtong");
+    expect(skipped.currentStationId).toBe("houtong");
+    expect(skipped.nextStationId).toBe("sandiaoling");
   });
 });

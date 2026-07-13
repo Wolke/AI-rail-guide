@@ -158,7 +158,7 @@ export function App() {
     activeResponse.current = "none";
     lastGuideKey.current = "";
     setSimulationState((state) => skipCurrentStation(state, routeId));
-    appendFeed(language === "en-US" ? "Skipped this stop. The train keeps moving to the next station." : "已跳過本站導覽，列車會繼續往下一站。");
+    appendFeed(language === "en-US" ? "Jumped to the next station. The train keeps moving forward." : "已跳到下一站，列車會繼續往後行駛。");
   };
 
   const changeLanguage = async (value: GuideLanguage) => {
