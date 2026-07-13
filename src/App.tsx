@@ -288,7 +288,8 @@ export function App() {
       },
       onTranscript: capturePendingQuestion,
       onResponseDone: handleRealtimeResponseDone,
-      onError: appendFeed
+      onError: appendFeed,
+      onDebug: appendFeed
     });
   }
 

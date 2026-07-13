@@ -74,6 +74,7 @@ export interface RealtimeCallbacks {
   onTranscript(text: string): void;
   onResponseDone(responseId?: string): void;
   onError(message: string): void;
+  onDebug?(message: string): void;
 }
 
 export class RealtimeRailClient {
@@ -227,11 +228,16 @@ export class RealtimeRailClient {
     }
     this.resumeOutput();
     this.lastIssuedResponseId = responseId;
+    const payload = buildRealtimeResponsePayload(context.language, context.routeId, text, responseId, context, isSystemJourneyEvent);
+    this.debug(
+      `response.create ${responseId}: current=${context.currentStationName}(${context.currentStationId}), next=${context.nextStationName ?? "none"}(${context.nextStationId ?? "none"}), phase=${context.phase}`
+    );
+    console.debug("[AI Rail Realtime] response.create", payload);
     this.dc.send(
       JSON.stringify({
         type: "response.create",
         event_id: responseId,
-        response: buildRealtimeResponsePayload(context.language, context.routeId, text, responseId, context, isSystemJourneyEvent)
+        response: payload
       })
     );
   }
@@ -298,6 +304,7 @@ export class RealtimeRailClient {
 
   cancelResponse(): void {
     if (this.dc?.readyState === "open") {
+      this.debug("response.cancel + output_audio_buffer.clear");
       this.dc.send(JSON.stringify({ type: "response.cancel" }));
       this.dc.send(JSON.stringify({ type: "output_audio_buffer.clear" }));
     }
@@ -345,6 +352,7 @@ export class RealtimeRailClient {
     const latestContext = this.latestContextLine(context);
     if (latestContext === this.lastSyncedContext) return;
     this.lastSyncedContext = latestContext;
+    this.debug(`session.update ${latestContext}`);
     this.dc.send(
       JSON.stringify({
         type: "session.update",
@@ -398,6 +406,10 @@ export class RealtimeRailClient {
       this.callbacks.onMessage(String(event.delta ?? ""));
     }
 
+    if (type === "error") {
+      this.callbacks.onError(`Realtime error: ${JSON.stringify(event.error ?? event)}`);
+    }
+
     if (type === "conversation.item.input_audio_transcription.completed") {
       this.callbacks.onTranscript(String(event.transcript ?? ""));
     }
@@ -405,6 +417,7 @@ export class RealtimeRailClient {
     if (type === "response.done") {
       const responseId = extractClientResponseId(event) ?? this.lastIssuedResponseId;
       if (responseId === this.lastIssuedResponseId) this.lastIssuedResponseId = undefined;
+      this.debug(`response.done ${responseId ?? "unknown"}`);
       this.callbacks.onResponseDone(responseId);
     }
 
@@ -442,6 +455,10 @@ export class RealtimeRailClient {
       })
     );
     this.dc?.send(JSON.stringify({ type: "response.create" }));
+  }
+
+  private debug(message: string): void {
+    this.callbacks.onDebug?.(`[Realtime debug] ${message}`);
   }
 }
 

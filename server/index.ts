@@ -152,7 +152,7 @@ app.post("/api/tools/get_guide_context", (req, res) => {
   const journeyId = String(req.body?.journeyId ?? "");
   const routeId = typeof req.body?.routeId === "string" ? req.body.routeId : journeys.get(journeyId)?.routeId ?? "tra-pingxi";
   const language = parseGuideLanguage(req.body?.language);
-  const simulation = parseSimulation(req.body?.simulation);
+  const simulation = parseSimulation(req.body?.simulation) ?? parseTourContextAsSimulation(req.body?.tourContext);
   const state = journeys.get(journeyId);
   res.json({ context: buildGuideContext(routeId, state, language, simulation) });
 });
@@ -210,20 +210,20 @@ function parseGpsPoint(body: unknown): GpsPoint | null {
 }
 
 function buildRealtimeInstructions(routeId: string, state: JourneyState | undefined, language: GuideLanguage, simulation?: TrainSimulationState): string {
-  const context = buildGuideContext(routeId, state, language, simulation);
   const languageRule =
     language === "en-US"
       ? "You must speak English. Do not switch to Chinese unless the user explicitly asks."
       : "你必須全程使用繁體中文口語回答。不要用英文開場、不要用英文解釋任務，除非使用者明確要求英文。";
   return [
     languageRule,
-    context.taskBrief,
+    "你是 AI Rail Guide，專業台鐵平溪線文史導遊。",
+    `routeId=${routeId}; journeyPhase=${state?.phase ?? "unknown"}。`,
+    simulation ? `Initial simulation snapshot: ${JSON.stringify(simulation)}` : "不要假設目前站點；每次導覽都必須以最新 response input 或 get_guide_context tool 回傳為準。",
     "你的任務不是閒聊助理，而是專業軌道導遊：一段導覽要講到段落邊界，不要因使用者背景聲音立刻中斷。",
     "使用者自然插話時，先把問題暫存；等目前段落結束，再回答或反問澄清。",
     "如果缺少即時營業狀態、班次或官方來源，不要編造；要說目前只有 MVP 種子資料。",
     "收到 guide segment prompt 時，只講指定段落，不要自己跳到下一段。",
-    "必要時呼叫 get_guide_context、get_station_story 或 get_nearby_pois 補上下文。",
-    `Guide context JSON:\n${JSON.stringify(context)}`
+    "必要時呼叫 get_guide_context、get_station_story 或 get_nearby_pois 補上下文；若工具參數有 tourContext，必須優先使用 tourContext，不要退回 journey 初始站。"
   ].join("\n");
 }
 
@@ -239,7 +239,8 @@ function buildRealtimeTools() {
           journeyId: { type: "string" },
           routeId: { type: "string" },
           language: { type: "string", enum: ["zh-TW", "en-US"] },
-          simulation: { type: "object" }
+          simulation: { type: "object" },
+          tourContext: { type: "object" }
         },
         required: ["journeyId"]
       }
@@ -342,6 +343,23 @@ function parseSimulation(value: unknown): TrainSimulationState | undefined {
   const simulation = value as Partial<TrainSimulationState>;
   if (typeof simulation.currentStationId !== "string") return undefined;
   return simulation as TrainSimulationState;
+}
+
+function parseTourContextAsSimulation(value: unknown): TrainSimulationState | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const context = value as Record<string, unknown>;
+  const currentStationId = typeof context.currentStationId === "string" ? context.currentStationId : undefined;
+  if (!currentStationId) return undefined;
+  return {
+    mode: context.phase === "traveling" ? "running_between_stations" : context.phase === "answering_question" ? "answering_pending_question" : "narrating_station",
+    currentStationId,
+    nextStationId: typeof context.nextStationId === "string" ? context.nextStationId : undefined,
+    segmentIndex: 0,
+    progressOnSegment: 0,
+    stationNarrationIndex: Number(context.guideSegmentIndex ?? 0),
+    pendingQuestion: { status: "none", text: "" },
+    fastMode: false
+  };
 }
 
 function isStationStory(value: StationStory | undefined): value is StationStory {
