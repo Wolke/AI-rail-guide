@@ -1,5 +1,5 @@
 import { callTool, createRealtimeSession } from "./api";
-import type { JourneyEventType, JourneyState } from "../shared/types";
+import type { GuideLanguage, JourneyEventType, JourneyState } from "../shared/types";
 
 type RealtimeStatus = "idle" | "connecting" | "connected" | "fallback" | "error";
 
@@ -16,18 +16,22 @@ export class RealtimeRailClient {
   private audio?: HTMLAudioElement;
   private callbacks: RealtimeCallbacks;
   private journeyId = "";
+  private routeId = "";
+  private language: GuideLanguage = "zh-TW";
 
   constructor(callbacks: RealtimeCallbacks) {
     this.callbacks = callbacks;
   }
 
-  async connect(journeyId: string, routeId: string): Promise<void> {
+  async connect(journeyId: string, routeId: string, language: GuideLanguage): Promise<void> {
     this.disconnect();
     this.journeyId = journeyId;
+    this.routeId = routeId;
+    this.language = language;
     this.callbacks.onStatus("connecting");
 
     try {
-      const token = await createRealtimeSession(journeyId, routeId);
+      const token = await createRealtimeSession(journeyId, routeId, language);
       if (!token.value) {
         this.callbacks.onStatus("fallback");
         this.callbacks.onError(token.error ?? "Realtime session is unavailable; using text fallback.");
@@ -49,6 +53,7 @@ export class RealtimeRailClient {
       this.dc = this.pc.createDataChannel("oai-events");
       this.dc.addEventListener("open", () => {
         this.callbacks.onStatus("connected");
+        this.sendMissionBriefing();
       });
       this.dc.addEventListener("message", (event) => void this.handleServerEvent(event.data));
 
@@ -87,18 +92,28 @@ export class RealtimeRailClient {
   }
 
   sendJourneyEvent(event: JourneyEventType, state: JourneyState): void {
-    const text = [
-      "Rail journey event received.",
-      `event=${event}`,
-      `journeyId=${state.journeyId}`,
-      `currentStationId=${state.currentStationId ?? "unknown"}`,
-      `nextStationId=${state.nextStationId ?? "unknown"}`,
-      "Please speak a short, contextual TRA guide segment in Traditional Chinese."
-    ].join("\n");
-    this.sendUserText(text);
+    const text =
+      this.language === "en-US"
+        ? [
+            "AI Rail Guide journey event.",
+            `Event: ${event}`,
+            `Journey ID: ${state.journeyId}`,
+            `Current station ID: ${state.currentStationId ?? "unknown"}`,
+            `Next station ID: ${state.nextStationId ?? "unknown"}`,
+            "Use get_guide_context if needed. Speak a short TRA guide segment in English."
+          ].join("\n")
+        : [
+            "AI Rail Guide 旅程事件。",
+            `事件：${event}`,
+            `旅程 ID：${state.journeyId}`,
+            `目前站點 ID：${state.currentStationId ?? "unknown"}`,
+            `下一站 ID：${state.nextStationId ?? "unknown"}`,
+            "必要時呼叫 get_guide_context。請用繁體中文說一段短的台鐵導覽，不要用英文。"
+          ].join("\n");
+    this.sendUserText(text, true);
   }
 
-  sendUserText(text: string): void {
+  sendUserText(text: string, isSystemJourneyEvent = false): void {
     if (!this.dc || this.dc.readyState !== "open") {
       this.callbacks.onError("Realtime data channel is not open.");
       return;
@@ -113,7 +128,36 @@ export class RealtimeRailClient {
         }
       })
     );
-    this.dc.send(JSON.stringify({ type: "response.create" }));
+    this.dc.send(JSON.stringify({ type: "response.create", response: { instructions: this.responseInstructions(isSystemJourneyEvent) } }));
+  }
+
+  private sendMissionBriefing(): void {
+    const briefing =
+      this.language === "en-US"
+        ? [
+            "Mission briefing: You are AI Rail Guide, a TRA cultural rail companion for the Pingxi Line.",
+            "Your job is to narrate local station stories, react to GPS journey events, and answer user interruptions.",
+            `journeyId=${this.journeyId}; routeId=${this.routeId}; language=en-US.`,
+            "Call get_guide_context before your first substantive guide segment if you need context."
+          ].join("\n")
+        : [
+            "任務簡報：你是 AI Rail Guide，平溪線台鐵文史軌道伴遊。",
+            "你的工作是根據 GPS 旅程事件主動說站點故事、回答使用者插話，並在合適時提供下車探索建議。",
+            `journeyId=${this.journeyId}; routeId=${this.routeId}; language=zh-TW。`,
+            "第一次正式導覽前，如果需要上下文，請呼叫 get_guide_context。全程使用繁體中文。"
+          ].join("\n");
+    this.sendUserText(briefing, true);
+  }
+
+  private responseInstructions(isSystemJourneyEvent: boolean): string {
+    if (this.language === "en-US") {
+      return isSystemJourneyEvent
+        ? "Speak English. Be a TRA rail guide. Keep this proactive guide segment under 45 seconds."
+        : "Speak English unless the user asks otherwise. Answer briefly, then return to the rail journey context.";
+    }
+    return isSystemJourneyEvent
+      ? "只能使用繁體中文。你是台鐵文史導覽員。這段主動導覽請控制在 45 秒內，不要用英文。"
+      : "只能使用繁體中文，除非使用者明確要求其他語言。先回答插話，再回到軌道伴遊情境。";
   }
 
   private async handleServerEvent(raw: string): Promise<void> {
@@ -146,7 +190,10 @@ export class RealtimeRailClient {
       args = {};
     }
 
-    const payload = typeof args === "object" && args ? { journeyId: this.journeyId, ...args } : { journeyId: this.journeyId };
+    const payload =
+      typeof args === "object" && args
+        ? { journeyId: this.journeyId, routeId: this.routeId, language: this.language, ...args }
+        : { journeyId: this.journeyId, routeId: this.routeId, language: this.language };
     const output = await callTool(name, payload);
     this.dc?.send(
       JSON.stringify({

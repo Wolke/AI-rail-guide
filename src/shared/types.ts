@@ -1,5 +1,7 @@
 export type RailMode = "tra";
 
+export type GuideLanguage = "zh-TW" | "en-US";
+
 export type GpsStatus = "idle" | "active" | "weak" | "lost" | "estimated";
 
 export type JourneyPhase = "idle" | "tracking" | "approaching_station" | "at_station" | "gps_lost";
@@ -78,4 +80,15 @@ export interface RealtimeClientSecretResponse {
   session?: unknown;
   fallback?: boolean;
   error?: string;
+}
+
+export interface GuideContext {
+  language: GuideLanguage;
+  route: Route | null;
+  currentStation?: Station;
+  nextStation?: Station;
+  relevantStories: StationStory[];
+  relevantPois: Poi[];
+  routeStationNames: string[];
+  taskBrief: string;
 }

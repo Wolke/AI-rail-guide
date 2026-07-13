@@ -4,7 +4,7 @@ import { RealtimeRailClient } from "./lib/realtimeClient";
 import { saveJourneyState } from "./lib/storage";
 import { useGeolocationJourney } from "./hooks/useGeolocationJourney";
 import { getRouteStations, getStationPois, getStationStory } from "./shared/seedData";
-import type { JourneyEventType, JourneyState, LocationUpdateResult, Station } from "./shared/types";
+import type { GuideLanguage, JourneyEventType, JourneyState, LocationUpdateResult, Station } from "./shared/types";
 
 type VoiceStatus = "idle" | "connecting" | "connected" | "fallback" | "error";
 
@@ -14,6 +14,7 @@ export function App() {
   const [journey, setJourney] = useState<JourneyState | null>(null);
   const [tracking, setTracking] = useState(false);
   const [voiceStatus, setVoiceStatus] = useState<VoiceStatus>("idle");
+  const [language, setLanguage] = useState<GuideLanguage>("zh-TW");
   const [feed, setFeed] = useState<string[]>(["按下開始旅程後，我會取得 GPS、建立 Realtime 語音導覽，並在接近站點時主動說故事。"]);
   const [input, setInput] = useState("");
   const [lastResult, setLastResult] = useState<LocationUpdateResult | null>(null);
@@ -28,7 +29,7 @@ export function App() {
     const station = findStation(routeStations, state.nextStationId ?? state.currentStationId);
     const story = station ? getStationStory(station.id) : undefined;
     const poi = station ? getStationPois(station.id)[0] : undefined;
-    appendFeed(formatEvent(event, station, story?.summary, poi?.pitchLine));
+    appendFeed(formatEvent(event, language, station, story?.summary, poi?.pitchLine));
     realtime.current?.sendJourneyEvent(event, state);
   };
 
@@ -61,7 +62,7 @@ export function App() {
       },
       onError: appendFeed
     });
-    await realtime.current.connect(response.journeyId, response.route.id);
+    await realtime.current.connect(response.journeyId, response.route.id, language);
   };
 
   const stopJourney = () => {
@@ -86,6 +87,7 @@ export function App() {
     const response = await sendFallbackChat({
       journeyId: journey.journeyId,
       message,
+      language,
       currentStationId: journey.currentStationId,
       nextStationId: journey.nextStationId
     });
@@ -99,7 +101,20 @@ export function App() {
           <p className="eyebrow">AI Rail Guide PWA</p>
           <h1>平溪線動態 AI 伴遊</h1>
         </div>
-        <div className={`status status-${voiceStatus}`}>{voiceStatusLabel(voiceStatus)}</div>
+        <div className="topbar-controls">
+          <label className="language-control">
+            <span>語言</span>
+            <select
+              value={language}
+              disabled={tracking}
+              onChange={(event) => setLanguage(event.target.value as GuideLanguage)}
+            >
+              <option value="zh-TW">繁體中文</option>
+              <option value="en-US">English</option>
+            </select>
+          </label>
+          <div className={`status status-${voiceStatus}`}>{voiceStatusLabel(voiceStatus)}</div>
+        </div>
       </section>
 
       <section className="dashboard">
@@ -197,8 +212,16 @@ function voiceStatusLabel(status: VoiceStatus): string {
   return labels[status];
 }
 
-function formatEvent(event: JourneyEventType, station?: Station, summary?: string, poiLine?: string): string {
+function formatEvent(event: JourneyEventType, language: GuideLanguage, station?: Station, summary?: string, poiLine?: string): string {
   const stationName = station?.name ?? "目前路段";
+  if (language === "en-US") {
+    if (event === "poi_recommendation" && poiLine) return `AI: ${poiLine}`;
+    if (event === "approaching_station") return `AI: We are approaching ${stationName}. ${summary ?? "I will prepare a local story."}`;
+    if (event === "arrived_station") return `AI: We have arrived at ${stationName}. ${summary ?? "This stop is worth a quick look."}`;
+    if (event === "gps_lost") return "AI: GPS is unstable. I will estimate from the previous journey state.";
+    if (event === "journey_started") return `AI: The journey has started near ${stationName}.`;
+    return `AI: The train is moving toward ${stationName}. ${summary ?? ""}`;
+  }
   if (event === "poi_recommendation" && poiLine) return `AI：${poiLine}`;
   if (event === "approaching_station") return `AI：快到 ${stationName} 了。${summary ?? "我會準備一段在地故事。"}`;
   if (event === "arrived_station") return `AI：抵達 ${stationName}。${summary ?? "這一站可以短暫停留觀察周邊。"}`;

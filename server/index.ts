@@ -2,7 +2,7 @@ import "dotenv/config";
 import express from "express";
 import { createInitialJourney, evaluateLocation, eventId, markGpsLost } from "../src/shared/geo";
 import { getRoute, getRouteStations, getStationPois, getStationStory, pois, routes, stations } from "../src/shared/seedData";
-import type { GpsPoint, JourneyEventType, JourneyState } from "../src/shared/types";
+import type { GpsPoint, GuideContext, GuideLanguage, JourneyEventType, JourneyState, Station, StationStory } from "../src/shared/types";
 
 const app = express();
 const port = Number(process.env.PORT ?? 8787);
@@ -79,6 +79,7 @@ app.post("/api/realtime/session", async (req, res) => {
 
   const routeId = typeof req.body?.routeId === "string" ? req.body.routeId : "tra-pingxi";
   const journeyId = typeof req.body?.journeyId === "string" ? req.body.journeyId : undefined;
+  const language = parseGuideLanguage(req.body?.language);
   const state = journeyId ? journeys.get(journeyId) : undefined;
   const model = process.env.OPENAI_REALTIME_MODEL ?? "gpt-realtime-2.1";
   const voice = process.env.OPENAI_REALTIME_VOICE ?? "marin";
@@ -87,7 +88,7 @@ app.post("/api/realtime/session", async (req, res) => {
     session: {
       type: "realtime",
       model,
-      instructions: buildRealtimeInstructions(routeId, state),
+      instructions: buildRealtimeInstructions(routeId, state, language),
       audio: {
         output: { voice },
         input: {
@@ -128,6 +129,7 @@ app.post("/api/realtime/session", async (req, res) => {
 
 app.post("/api/chat", (req, res) => {
   const message = String(req.body?.message ?? "").trim();
+  const language = parseGuideLanguage(req.body?.language);
   const stationId = typeof req.body?.currentStationId === "string" ? req.body.currentStationId : "ruifang";
   const story = getStationStory(stationId);
   const station = stations.find((item) => item.id === stationId);
@@ -135,8 +137,19 @@ app.post("/api/chat", (req, res) => {
   const poiLine = nearbyPois[0]?.pitchLine ?? "目前先留在車上聽故事，下一站再看是否適合下車。";
 
   res.json({
-    text: `你問「${message || "現在附近有什麼故事"}」。以${station?.name ?? "這一站"}來說，${story?.summary ?? "這裡是平溪線山谷旅程的一段轉折。"} ${poiLine}`
+    text:
+      language === "en-US"
+        ? `You asked, "${message || "what is around here"}." Around ${station?.name ?? "this station"}, ${story?.summary ?? "this is a valley segment of the Pingxi Line."} ${nearbyPois[0]?.pitchLine ?? ""}`
+        : `你問「${message || "現在附近有什麼故事"}」。以${station?.name ?? "這一站"}來說，${story?.summary ?? "這裡是平溪線山谷旅程的一段轉折。"} ${poiLine}`
   });
+});
+
+app.post("/api/tools/get_guide_context", (req, res) => {
+  const journeyId = String(req.body?.journeyId ?? "");
+  const routeId = typeof req.body?.routeId === "string" ? req.body.routeId : journeys.get(journeyId)?.routeId ?? "tra-pingxi";
+  const language = parseGuideLanguage(req.body?.language);
+  const state = journeys.get(journeyId);
+  res.json({ context: buildGuideContext(routeId, state, language) });
 });
 
 app.post("/api/tools/get_current_journey_state", (req, res) => {
@@ -191,22 +204,40 @@ function parseGpsPoint(body: unknown): GpsPoint | null {
   };
 }
 
-function buildRealtimeInstructions(routeId: string, state?: JourneyState): string {
-  const route = getRoute(routeId);
-  const currentStation = state?.currentStationId ? stations.find((station) => station.id === state.currentStationId) : undefined;
+function buildRealtimeInstructions(routeId: string, state: JourneyState | undefined, language: GuideLanguage): string {
+  const context = buildGuideContext(routeId, state, language);
+  const languageRule =
+    language === "en-US"
+      ? "You must speak English. Do not switch to Chinese unless the user explicitly asks."
+      : "你必須全程使用繁體中文口語回答。不要用英文開場、不要用英文解釋任務，除非使用者明確要求英文。";
   return [
-    "你是 AI Rail Guide 的台鐵文史導覽員。",
-    "用繁體中文回答，語氣像在地朋友加文史嚮導，精準、溫暖、不要浮誇。",
-    "每次主動導覽控制在 20 到 45 秒；如果使用者插話，先回答問題，再自然接回旅程。",
-    "不要假裝知道即時營業狀態或班次。沒有資料時明確說目前只能提供 MVP 種子資料。",
-    "收到 journey event 時，根據目前站點、下一站、故事與 POI 生成語音導覽。",
-    `目前路線：${route?.name ?? routeId}。`,
-    currentStation ? `目前推定站點：${currentStation.name}。` : "目前尚未取得站點。"
+    languageRule,
+    context.taskBrief,
+    "你的任務不是閒聊助理，而是軌道伴遊 voice agent：根據 GPS 事件、目前站點、下一站、故事資料與 POI 推薦，主動產生短語音導覽。",
+    "每次主動導覽控制在 20 到 45 秒；使用者插話時，先回答問題，再自然接回旅程。",
+    "如果缺少即時營業狀態、班次或官方來源，不要編造；要說目前只有 MVP 種子資料。",
+    "收到 journey event 時，先判斷事件類型，再用 guide context 的故事與 POI 回答。",
+    "必要時呼叫 get_guide_context、get_station_story 或 get_nearby_pois 補上下文。",
+    `Guide context JSON:\n${JSON.stringify(context)}`
   ].join("\n");
 }
 
 function buildRealtimeTools() {
   return [
+    {
+      type: "function",
+      name: "get_guide_context",
+      description: "Get the full route, station, language, story, and POI context for the current AI Rail Guide journey.",
+      parameters: {
+        type: "object",
+        properties: {
+          journeyId: { type: "string" },
+          routeId: { type: "string" },
+          language: { type: "string", enum: ["zh-TW", "en-US"] }
+        },
+        required: ["journeyId"]
+      }
+    },
     {
       type: "function",
       name: "get_current_journey_state",
@@ -252,6 +283,47 @@ function buildRealtimeTools() {
       }
     }
   ];
+}
+
+function buildGuideContext(routeId: string, state: JourneyState | undefined, language: GuideLanguage): GuideContext {
+  const route = getRoute(routeId) ?? null;
+  const routeStations = getRouteStations(routeId);
+  const currentStation = findStation(state?.currentStationId);
+  const nextStation = findStation(state?.nextStationId);
+  const relevantStationIds = uniqueStrings([currentStation?.id, nextStation?.id, routeStations[0]?.id]);
+  const relevantStories = relevantStationIds.map((stationId) => getStationStory(stationId)).filter(isStationStory);
+  const relevantPois = relevantStationIds.flatMap((stationId) => getStationPois(stationId));
+  const taskBrief =
+    language === "en-US"
+      ? "AI Rail Guide turns a train ride into an immersive micro-trip. Act as a TRA cultural guide, explain what is outside the window, and suggest one optional stop only when context supports it."
+      : "AI Rail Guide 要把枯燥的軌道移動變成沉浸式微旅行。你要化身台鐵文史嚮導，說明窗外與站點故事，並在適合時推一個可下車探索的點。";
+
+  return {
+    language,
+    route,
+    currentStation,
+    nextStation,
+    relevantStories,
+    relevantPois,
+    routeStationNames: routeStations.map((station) => station.name),
+    taskBrief
+  };
+}
+
+function findStation(stationId?: string): Station | undefined {
+  return stationId ? stations.find((station) => station.id === stationId) : undefined;
+}
+
+function uniqueStrings(values: Array<string | undefined>): string[] {
+  return [...new Set(values.filter((value): value is string => Boolean(value)))];
+}
+
+function parseGuideLanguage(value: unknown): GuideLanguage {
+  return value === "en-US" ? "en-US" : "zh-TW";
+}
+
+function isStationStory(value: StationStory | undefined): value is StationStory {
+  return Boolean(value);
 }
 
 function hashSafetyIdentifier(value: string): string {

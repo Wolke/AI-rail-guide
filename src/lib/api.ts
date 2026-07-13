@@ -1,4 +1,4 @@
-import type { GpsPoint, JourneyState, LocationUpdateResult, RealtimeClientSecretResponse, Route, Station } from "../shared/types";
+import type { GpsPoint, GuideLanguage, JourneyState, LocationUpdateResult, RealtimeClientSecretResponse, Route, Station } from "../shared/types";
 
 export interface JourneyStartResponse {
   journeyId: string;
@@ -15,13 +15,14 @@ export async function updateLocation(journeyId: string, point?: Partial<GpsPoint
   return postJson("/api/location/update", { journeyId, ...point });
 }
 
-export async function createRealtimeSession(journeyId: string, routeId: string): Promise<RealtimeClientSecretResponse> {
-  return postJson("/api/realtime/session", { journeyId, routeId });
+export async function createRealtimeSession(journeyId: string, routeId: string, language: GuideLanguage): Promise<RealtimeClientSecretResponse> {
+  return postJson("/api/realtime/session", { journeyId, routeId, language });
 }
 
 export async function sendFallbackChat(input: {
   journeyId?: string;
   message: string;
+  language: GuideLanguage;
   currentStationId?: string;
   nextStationId?: string;
 }): Promise<{ text: string }> {
