@@ -78,9 +78,8 @@ export function skipCurrentStation(state: TrainSimulationState, routeId = DEFAUL
 
   return {
     ...state,
-    mode: "narrating_station",
-    currentStationId: nextStationId,
-    nextStationId: getNextStationId(routeId, nextStationId),
+    mode: "running_between_stations",
+    nextStationId,
     segmentIndex: state.segmentIndex + 1,
     progressOnSegment: 0,
     stationNarrationIndex: 0,
