@@ -71,7 +71,19 @@ export function completePendingQuestionAnswer(state: TrainSimulationState, route
 }
 
 export function skipCurrentStation(state: TrainSimulationState, routeId = DEFAULT_ROUTE_ID): TrainSimulationState {
-  return moveToNextSegmentOrComplete({ ...state, pendingQuestion: emptyPendingQuestion() }, routeId);
+  if (state.mode === "running_between_stations" && state.nextStationId) {
+    const arrived = {
+      ...state,
+      mode: "narrating_station" as const,
+      currentStationId: state.nextStationId,
+      nextStationId: getNextStationId(routeId, state.nextStationId),
+      progressOnSegment: 0,
+      stationNarrationIndex: 0,
+      pendingQuestion: emptyPendingQuestion()
+    };
+    return moveToNextSegmentOrComplete(arrived, routeId);
+  }
+  return moveToNextSegmentOrComplete({ ...state, pendingQuestion: emptyPendingQuestion(), pausedFrom: undefined }, routeId);
 }
 
 export function classifyPendingQuestion(text: string, segmentIndex: number): PendingQuestion {

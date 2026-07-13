@@ -28,4 +28,13 @@ describe("train simulation", () => {
     expect(skipped.mode).toBe("running_between_stations");
     expect(skipped.nextStationId).toBe("houtong");
   });
+
+  it("can skip the upcoming stop while already moving", () => {
+    const state = startSimulation(createInitialSimulation("tra-pingxi", true));
+    const skipped = skipCurrentStation(state);
+
+    expect(skipped.mode).toBe("running_between_stations");
+    expect(skipped.currentStationId).toBe("houtong");
+    expect(skipped.nextStationId).toBe("sandiaoling");
+  });
 });

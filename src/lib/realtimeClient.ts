@@ -132,6 +132,7 @@ export class RealtimeRailClient {
       this.callbacks.onError("Realtime data channel is not open.");
       return;
     }
+    this.resumeOutput();
     this.dc.send(
       JSON.stringify({
         type: "conversation.item.create",
@@ -180,6 +181,21 @@ export class RealtimeRailClient {
   cancelResponse(): void {
     if (this.dc?.readyState === "open") {
       this.dc.send(JSON.stringify({ type: "response.cancel" }));
+    }
+  }
+
+  stopOutput(): void {
+    this.cancelResponse();
+    if (this.audio) {
+      this.audio.muted = true;
+      this.audio.pause();
+    }
+  }
+
+  resumeOutput(): void {
+    if (this.audio) {
+      this.audio.muted = false;
+      void this.audio.play().catch(() => undefined);
     }
   }
 

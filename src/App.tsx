@@ -139,10 +139,11 @@ export function App() {
   const pauseOrResume = () => {
     if (simulation.mode === "paused") {
       lastGuideKey.current = "";
+      realtime.current?.resumeOutput();
       setSimulationState((state) => ({ ...state, mode: state.pausedFrom ?? "narrating_station", pausedFrom: undefined }));
       return;
     }
-    realtime.current?.cancelResponse();
+    realtime.current?.stopOutput();
     clearFallbackTimer();
     clearResponseBoundaryTimer();
     activeResponse.current = "none";
@@ -150,7 +151,7 @@ export function App() {
   };
 
   const skipStation = () => {
-    realtime.current?.cancelResponse();
+    realtime.current?.stopOutput();
     clearFallbackTimer();
     clearResponseBoundaryTimer();
     activeResponse.current = "none";
