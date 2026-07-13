@@ -1,0 +1,17 @@
+{
+  "name": "AI Rail Guide",
+  "short_name": "Rail Guide",
+  "description": "Dynamic AI rail companion for Taiwan train micro-travel.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f6f4ed",
+  "theme_color": "#12312b",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
