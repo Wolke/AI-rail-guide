@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildRealtimeSessionInstructions, formatTourContextLine } from "./realtimeClient";
+import { buildRealtimeResponsePayload, buildRealtimeSessionInstructions, formatTourContextLine } from "./realtimeClient";
 import type { TourContext } from "../shared/tourOrchestrator";
 
 const context: TourContext = {
@@ -28,5 +28,15 @@ describe("Realtime prompt context", () => {
     expect(instructions).toContain("currentStationName=三貂嶺");
     expect(instructions).toContain("nextStationName=大華");
     expect(instructions).toContain("abandon the previous station");
+  });
+
+  it("creates isolated response payloads with authoritative current station context", () => {
+    const payload = buildRealtimeResponsePayload("zh-TW", "tra-pingxi", "導覽段落：三貂嶺 1/5", "guide-123", context, true);
+
+    expect(payload.conversation).toBe("none");
+    expect(payload.metadata.client_response_id).toBe("guide-123");
+    expect(payload.metadata.currentStationId).toBe("sandiaoling");
+    expect(payload.instructions).toContain("本次 response input 是唯一權威狀態");
+    expect(JSON.stringify(payload.input)).toContain("導覽段落：三貂嶺 1/5");
   });
 });

@@ -35,6 +35,39 @@ export function buildRealtimeSessionInstructions(language: GuideLanguage, routeI
   ].join("\n");
 }
 
+export function buildRealtimeResponseInput(text: string) {
+  return [
+    {
+      type: "message",
+      role: "user",
+      content: [{ type: "input_text", text }]
+    }
+  ];
+}
+
+export function buildRealtimeResponsePayload(language: GuideLanguage, routeId: string, text: string, responseId: string, context?: TourContext, isSystemJourneyEvent = false) {
+  const latestContext = context ? formatTourContextLine(context) : `LATEST_CONTEXT routeId=${routeId}; language=${language}; currentStationId=unknown;`;
+  const responseInstructions =
+    language === "en-US"
+      ? isSystemJourneyEvent
+        ? `Speak English. Be a TRA rail guide. Use this response input as the authoritative latest state. ${latestContext}`
+        : `Speak English unless the user asks otherwise. Answer briefly, then return to the rail journey context. Use this response input as the authoritative latest state. ${latestContext}`
+      : isSystemJourneyEvent
+        ? `只能使用繁體中文。你是台鐵文史導覽員。本次 response input 是唯一權威狀態，不要延續上一站。${latestContext}`
+        : `只能使用繁體中文，除非使用者明確要求其他語言。先回答插話，再回到軌道伴遊情境。本次 response input 是唯一權威狀態。${latestContext}`;
+  return {
+    instructions: responseInstructions,
+    conversation: "none",
+    metadata: {
+      client_response_id: responseId,
+      currentStationId: context?.currentStationId ?? "unknown",
+      nextStationId: context?.nextStationId ?? "none",
+      phase: context?.phase ?? "unknown"
+    },
+    input: buildRealtimeResponseInput(text)
+  };
+}
+
 export interface RealtimeCallbacks {
   onStatus(status: RealtimeStatus): void;
   onMessage(message: string): void;
@@ -99,7 +132,7 @@ export class RealtimeRailClient {
       this.dc = this.pc.createDataChannel("oai-events");
       this.dc.addEventListener("open", () => {
         this.callbacks.onStatus("connected");
-        this.sendMissionBriefing();
+        if (this.latestContext) this.syncContext(this.latestContext);
       });
       this.dc.addEventListener("message", (event) => void this.handleServerEvent(event.data));
 
@@ -187,6 +220,22 @@ export class RealtimeRailClient {
     this.dc.send(JSON.stringify({ type: "response.create", response: { instructions: this.responseInstructions(isSystemJourneyEvent) } }));
   }
 
+  sendIsolatedResponse(text: string, responseId: string, context: TourContext, isSystemJourneyEvent = false): void {
+    if (!this.dc || this.dc.readyState !== "open") {
+      this.callbacks.onError("Realtime data channel is not open.");
+      return;
+    }
+    this.resumeOutput();
+    this.lastIssuedResponseId = responseId;
+    this.dc.send(
+      JSON.stringify({
+        type: "response.create",
+        event_id: responseId,
+        response: buildRealtimeResponsePayload(context.language, context.routeId, text, responseId, context, isSystemJourneyEvent)
+      })
+    );
+  }
+
   sendGuideSegment(context: TourContext, segmentText: string, segmentLabel: string, responseId: string): void {
     this.syncContext(context);
     const latestContext = this.latestContextLine(context);
@@ -208,7 +257,7 @@ export class RealtimeRailClient {
             "這是最新站點 context；如果和先前站點記憶衝突，一律以這裡為準。",
             "請像專業台鐵導遊一樣，只講這一段。講完整段落後停下，不要在段落中途回答旅客問題。"
           ].join("\n");
-    this.sendUserText(text, true, responseId);
+    this.sendIsolatedResponse(text, responseId, context, true);
   }
 
   answerQuestion(context: TourContext, question: string, responseId: string): void {
@@ -227,7 +276,7 @@ export class RealtimeRailClient {
             `旅客剛剛在上一段導覽中問：「${question}」。`,
             `現在請先回答這個問題，地點脈絡是 ${context.currentStationName}，回答後自然接回導覽。`
           ].join("\n");
-    this.sendUserText(text, false, responseId);
+    this.sendIsolatedResponse(text, responseId, context);
   }
 
   askQuestionClarification(context: TourContext, question: string, responseId: string): void {
@@ -244,12 +293,13 @@ export class RealtimeRailClient {
             this.latestContextLine(context),
             `旅客剛剛像是想問問題，但不夠清楚：「${question}」。請用一句話反問他想問哪一部分。`
           ].join("\n");
-    this.sendUserText(text, false, responseId);
+    this.sendIsolatedResponse(text, responseId, context);
   }
 
   cancelResponse(): void {
     if (this.dc?.readyState === "open") {
       this.dc.send(JSON.stringify({ type: "response.cancel" }));
+      this.dc.send(JSON.stringify({ type: "output_audio_buffer.clear" }));
     }
     this.lastIssuedResponseId = undefined;
   }
@@ -315,26 +365,6 @@ export class RealtimeRailClient {
     );
   }
 
-  private sendMissionBriefing(): void {
-    const briefing =
-      this.language === "en-US"
-        ? [
-            "Mission briefing: You are AI Rail Guide, a TRA cultural rail companion for the Pingxi Line.",
-            "Your job is to narrate local station stories, react to GPS journey events, and answer user interruptions.",
-            `journeyId=${this.journeyId}; routeId=${this.routeId}; language=en-US.`,
-            this.latestContext ? this.latestContextLine(this.latestContext) : "",
-            "Call get_guide_context before your first substantive guide segment if you need context."
-          ].join("\n")
-        : [
-            "任務簡報：你是 AI Rail Guide，平溪線台鐵文史軌道伴遊。",
-            "你的工作是根據 GPS 旅程事件主動說站點故事、回答使用者插話，並在合適時提供下車探索建議。",
-            `journeyId=${this.journeyId}; routeId=${this.routeId}; language=zh-TW。`,
-            this.latestContext ? this.latestContextLine(this.latestContext) : "",
-            "第一次正式導覽前，如果需要上下文，請呼叫 get_guide_context。全程使用繁體中文。"
-          ].join("\n");
-    this.sendUserText(briefing, true);
-  }
-
   private sessionInstructions(context?: TourContext): string {
     return buildRealtimeSessionInstructions(this.language, this.routeId, context ?? this.latestContext);
   }
@@ -373,8 +403,8 @@ export class RealtimeRailClient {
     }
 
     if (type === "response.done") {
-      const responseId = this.lastIssuedResponseId;
-      this.lastIssuedResponseId = undefined;
+      const responseId = extractClientResponseId(event) ?? this.lastIssuedResponseId;
+      if (responseId === this.lastIssuedResponseId) this.lastIssuedResponseId = undefined;
       this.callbacks.onResponseDone(responseId);
     }
 
@@ -413,4 +443,13 @@ export class RealtimeRailClient {
     );
     this.dc?.send(JSON.stringify({ type: "response.create" }));
   }
+}
+
+function extractClientResponseId(event: Record<string, unknown>): string | undefined {
+  const response = event.response;
+  if (!response || typeof response !== "object") return undefined;
+  const metadata = (response as Record<string, unknown>).metadata;
+  if (!metadata || typeof metadata !== "object") return undefined;
+  const value = (metadata as Record<string, unknown>).client_response_id;
+  return typeof value === "string" ? value : undefined;
 }
