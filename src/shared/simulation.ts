@@ -71,19 +71,22 @@ export function completePendingQuestionAnswer(state: TrainSimulationState, route
 }
 
 export function skipCurrentStation(state: TrainSimulationState, routeId = DEFAULT_ROUTE_ID): TrainSimulationState {
-  if (state.mode === "running_between_stations" && state.nextStationId) {
-    const arrived = {
-      ...state,
-      mode: "narrating_station" as const,
-      currentStationId: state.nextStationId,
-      nextStationId: getNextStationId(routeId, state.nextStationId),
-      progressOnSegment: 0,
-      stationNarrationIndex: 0,
-      pendingQuestion: emptyPendingQuestion()
-    };
-    return moveToNextSegmentOrComplete(arrived, routeId);
+  const nextStationId = state.nextStationId ?? getNextStationId(routeId, state.currentStationId);
+  if (!nextStationId) {
+    return { ...state, mode: "completed", progressOnSegment: 1, pendingQuestion: emptyPendingQuestion(), pausedFrom: undefined };
   }
-  return moveToNextSegmentOrComplete({ ...state, pendingQuestion: emptyPendingQuestion(), pausedFrom: undefined }, routeId);
+
+  return {
+    ...state,
+    mode: "narrating_station",
+    currentStationId: nextStationId,
+    nextStationId: getNextStationId(routeId, nextStationId),
+    segmentIndex: state.segmentIndex + 1,
+    progressOnSegment: 0,
+    stationNarrationIndex: 0,
+    pendingQuestion: emptyPendingQuestion(),
+    pausedFrom: undefined
+  };
 }
 
 export function classifyPendingQuestion(text: string, segmentIndex: number): PendingQuestion {

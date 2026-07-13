@@ -151,13 +151,14 @@ export function App() {
   };
 
   const skipStation = () => {
-    realtime.current?.stopOutput();
+    realtime.current?.cancelResponse();
+    realtime.current?.resumeOutput();
     clearFallbackTimer();
     clearResponseBoundaryTimer();
     activeResponse.current = "none";
     lastGuideKey.current = "";
     setSimulationState((state) => skipCurrentStation(state, routeId));
-    appendFeed(language === "en-US" ? "Skipped this stop. The train continues." : "已跳過本站，列車繼續行駛。");
+    appendFeed(language === "en-US" ? "Jumped to the next station. Continuing the guide." : "已跳到下一站，導覽會直接接續。");
   };
 
   const changeLanguage = async (value: GuideLanguage) => {
