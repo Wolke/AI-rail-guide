@@ -1,4 +1,5 @@
 import { callTool, createRealtimeSession } from "./api";
+import { getRouteStations } from "../shared/seedData";
 import type { GuideLanguage, JourneyEventType, JourneyState, TrainSimulationState } from "../shared/types";
 
 type RealtimeStatus = "idle" | "connecting" | "connected" | "fallback" | "error";
@@ -21,6 +22,7 @@ export class RealtimeRailClient {
   private routeId = "";
   private language: GuideLanguage = "zh-TW";
   private simulation?: TrainSimulationState;
+  private lastSyncedContext = "";
 
   constructor(callbacks: RealtimeCallbacks) {
     this.callbacks = callbacks;
@@ -32,6 +34,7 @@ export class RealtimeRailClient {
     this.routeId = routeId;
     this.language = language;
     this.simulation = simulation;
+    this.lastSyncedContext = "";
     this.callbacks.onStatus("connecting");
 
     try {
@@ -93,6 +96,7 @@ export class RealtimeRailClient {
 
   setSimulation(simulation: TrainSimulationState): void {
     this.simulation = simulation;
+    this.syncSessionContext();
   }
 
   disconnect(): void {
@@ -103,6 +107,7 @@ export class RealtimeRailClient {
     this.pc = undefined;
     this.micStream = undefined;
     this.audio = undefined;
+    this.lastSyncedContext = "";
   }
 
   sendJourneyEvent(event: JourneyEventType, state: JourneyState): void {
@@ -147,16 +152,22 @@ export class RealtimeRailClient {
   }
 
   sendGuideSegment(segmentText: string, segmentLabel: string): void {
+    this.syncSessionContext();
+    const latestContext = this.latestContextLine();
     const text =
       this.language === "en-US"
         ? [
+            latestContext,
             `Guide segment: ${segmentLabel}`,
             segmentText,
+            "This is the latest station context. Ignore any previous station context if it conflicts.",
             "Deliver only this segment as a professional rail guide. Do not answer pending passenger questions until this segment is complete."
           ].join("\n")
         : [
+            latestContext,
             `導覽段落：${segmentLabel}`,
             segmentText,
+            "這是最新站點 context；如果和先前站點記憶衝突，一律以這裡為準。",
             "請像專業台鐵導遊一樣，只講這一段。講完整段落後停下，不要在段落中途回答旅客問題。"
           ].join("\n");
     this.sendUserText(text, true);
@@ -220,6 +231,31 @@ export class RealtimeRailClient {
     );
   }
 
+  private syncSessionContext(): void {
+    if (this.dc?.readyState !== "open") return;
+    const latestContext = this.latestContextLine();
+    if (latestContext === this.lastSyncedContext) return;
+    this.lastSyncedContext = latestContext;
+    this.dc.send(
+      JSON.stringify({
+        type: "session.update",
+        session: {
+          instructions: this.sessionInstructions(),
+          audio: {
+            input: {
+              turn_detection: {
+                type: "semantic_vad",
+                eagerness: "low",
+                create_response: false,
+                interrupt_response: false
+              }
+            }
+          }
+        }
+      })
+    );
+  }
+
   private sendMissionBriefing(): void {
     const briefing =
       this.language === "en-US"
@@ -240,15 +276,53 @@ export class RealtimeRailClient {
     this.sendUserText(briefing, true);
   }
 
+  private sessionInstructions(): string {
+    const languageRule =
+      this.language === "en-US"
+        ? "You must speak English unless the user explicitly requests another language."
+        : "你必須全程使用繁體中文口語回答，除非使用者明確要求其他語言。";
+    const latestContext = this.latestContextLine();
+    return [
+      languageRule,
+      "You are AI Rail Guide, a professional TRA cultural guide. You are not a generic assistant.",
+      "Always prioritize the newest simulation context over older conversation memory.",
+      latestContext,
+      "If the user jumps to another station, abandon the previous station and continue the guide from the new currentStationId.",
+      "During guide narration, finish the current segment before answering pending passenger questions."
+    ].join("\n");
+  }
+
+  private latestContextLine(): string {
+    if (!this.simulation) {
+      return `LATEST_CONTEXT routeId=${this.routeId}; language=${this.language}; currentStationId=unknown;`;
+    }
+    const routeStations = getRouteStations(this.routeId);
+    const currentStationName = routeStations.find((station) => station.id === this.simulation?.currentStationId)?.name ?? this.simulation.currentStationId;
+    const nextStationName = routeStations.find((station) => station.id === this.simulation?.nextStationId)?.name ?? this.simulation.nextStationId ?? "none";
+    return [
+      "LATEST_CONTEXT",
+      `routeId=${this.routeId}`,
+      `language=${this.language}`,
+      `mode=${this.simulation.mode}`,
+      `currentStationId=${this.simulation.currentStationId}`,
+      `currentStationName=${currentStationName}`,
+      `nextStationId=${this.simulation.nextStationId ?? "none"}`,
+      `nextStationName=${nextStationName}`,
+      `stationNarrationIndex=${this.simulation.stationNarrationIndex}`,
+      `pendingQuestionStatus=${this.simulation.pendingQuestion.status}`
+    ].join("; ");
+  }
+
   private responseInstructions(isSystemJourneyEvent: boolean): string {
+    const latestContext = this.latestContextLine();
     if (this.language === "en-US") {
       return isSystemJourneyEvent
-        ? "Speak English. Be a TRA rail guide. Keep this proactive guide segment under 45 seconds."
-        : "Speak English unless the user asks otherwise. Answer briefly, then return to the rail journey context.";
+        ? `Speak English. Be a TRA rail guide. Use the newest station context only. ${latestContext}`
+        : `Speak English unless the user asks otherwise. Answer briefly, then return to the rail journey context. ${latestContext}`;
     }
     return isSystemJourneyEvent
-      ? "只能使用繁體中文。你是台鐵文史導覽員。這段主動導覽請控制在 45 秒內，不要用英文。"
-      : "只能使用繁體中文，除非使用者明確要求其他語言。先回答插話，再回到軌道伴遊情境。";
+      ? `只能使用繁體中文。你是台鐵文史導覽員。只使用最新站點 context，不要延續上一站。${latestContext}`
+      : `只能使用繁體中文，除非使用者明確要求其他語言。先回答插話，再回到軌道伴遊情境。${latestContext}`;
   }
 
   private async handleServerEvent(raw: string): Promise<void> {
