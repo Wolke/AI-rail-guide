@@ -70,8 +70,10 @@ export function App() {
   const realtime = useRef<RealtimeRailClient | null>(null);
   const routeStations = useMemo(() => getRouteStations(routeId), []);
   const activeResponse = useRef<ActiveResponse>("none");
+  const activeResponseStartedAt = useRef(0);
   const lastGuideKey = useRef("");
   const fallbackTimer = useRef<number | null>(null);
+  const responseBoundaryTimer = useRef<number | null>(null);
   const simulationRef = useRef(simulation);
   const languageRef = useRef(language);
 
@@ -83,6 +85,7 @@ export function App() {
   const currentSegment = localizedScript?.segments[simulation.stationNarrationIndex] ?? "";
   const segmentCount = localizedScript?.segments.length ?? 0;
   const trainLeft = computeTrainLeft(routeStations, simulation);
+  const realtimeBlockedReason = getRealtimeBlockedReason();
 
   useEffect(() => {
     simulationRef.current = simulation;
@@ -135,15 +138,21 @@ export function App() {
 
   const pauseOrResume = () => {
     if (simulation.mode === "paused") {
-      setSimulationState((state) => ({ ...state, mode: state.nextStationId ? "running_between_stations" : "narrating_station" }));
+      lastGuideKey.current = "";
+      setSimulationState((state) => ({ ...state, mode: state.pausedFrom ?? "narrating_station", pausedFrom: undefined }));
       return;
     }
-    setSimulationState((state) => ({ ...state, mode: "paused" }));
+    realtime.current?.cancelResponse();
+    clearFallbackTimer();
+    clearResponseBoundaryTimer();
+    activeResponse.current = "none";
+    setSimulationState((state) => ({ ...state, mode: "paused", pausedFrom: state.mode === "paused" ? state.pausedFrom : state.mode }));
   };
 
   const skipStation = () => {
     realtime.current?.cancelResponse();
     clearFallbackTimer();
+    clearResponseBoundaryTimer();
     activeResponse.current = "none";
     lastGuideKey.current = "";
     setSimulationState((state) => skipCurrentStation(state, routeId));
@@ -183,7 +192,7 @@ export function App() {
   };
 
   const capturePendingQuestion = (text: string) => {
-    const pending = classifyPendingQuestion(text, simulation.stationNarrationIndex);
+    const pending = classifyPendingQuestion(text, simulationRef.current.stationNarrationIndex);
     if (pending.status === "none") return;
     setSimulationState((state) => {
       if (state.pendingQuestion.status === "clear_question") return state;
@@ -201,6 +210,19 @@ export function App() {
   };
 
   const handleResponseDone = () => {
+    const kind = activeResponse.current;
+    if (kind === "segment") {
+      const remainingMs = getRemainingSegmentMs(activeResponseStartedAt.current, simulationRef.current, getStationGuideScript(simulationRef.current.currentStationId)?.durationSeconds ?? 180);
+      if (remainingMs > 0) {
+        clearResponseBoundaryTimer();
+        responseBoundaryTimer.current = window.setTimeout(() => completeActiveResponse(), remainingMs);
+        return;
+      }
+    }
+    completeActiveResponse();
+  };
+
+  const completeActiveResponse = () => {
     const kind = activeResponse.current;
     activeResponse.current = "none";
     if (kind === "segment") {
@@ -224,6 +246,7 @@ export function App() {
     if (lastGuideKey.current === key) return;
     lastGuideKey.current = key;
     activeResponse.current = "segment";
+    activeResponseStartedAt.current = Date.now();
     appendFeed(
       language === "en-US"
         ? `Guide: ${currentStation.name} segment ${simulation.stationNarrationIndex + 1}/${segmentCount}`
@@ -233,7 +256,7 @@ export function App() {
       realtime.current?.sendGuideSegment(currentSegment, `${currentStation.name} ${simulation.stationNarrationIndex + 1}/${segmentCount}`);
     } else {
       appendFeed(`AI：${currentSegment}`);
-      scheduleFallbackDone(simulation.fastMode ? 4_000 : 12_000);
+      scheduleFallbackDone(getSegmentDurationMs(simulation, guideScript?.durationSeconds ?? 180));
     }
   }, [currentSegment, currentStation?.id, language, segmentCount, simulation.currentStationId, simulation.fastMode, simulation.mode, simulation.stationNarrationIndex, voiceStatus]);
 
@@ -242,6 +265,7 @@ export function App() {
     const pending = simulation.pendingQuestion;
     if (pending.status === "clear_question") {
       activeResponse.current = "question";
+      activeResponseStartedAt.current = Date.now();
       if (voiceStatus === "connected") {
         realtime.current?.answerPendingQuestion(pending.text, currentStation.name);
       } else {
@@ -258,6 +282,7 @@ export function App() {
       }
     } else if (pending.status === "unclear_question") {
       activeResponse.current = "clarification";
+      activeResponseStartedAt.current = Date.now();
       if (voiceStatus === "connected") {
         realtime.current?.askQuestionClarification(pending.text);
       } else {
@@ -333,6 +358,7 @@ export function App() {
           </button>
           <span className="meta">{languageState}</span>
         </div>
+        {realtimeBlockedReason ? <p className="warning">{realtimeBlockedReason}</p> : null}
       </section>
 
       <section className="dashboard">
@@ -383,6 +409,13 @@ export function App() {
       fallbackTimer.current = null;
     }
   }
+
+  function clearResponseBoundaryTimer() {
+    if (responseBoundaryTimer.current != null) {
+      window.clearTimeout(responseBoundaryTimer.current);
+      responseBoundaryTimer.current = null;
+    }
+  }
 }
 
 function Metric({ label, value }: { label: string; value: string }) {
@@ -408,6 +441,22 @@ function computeTrainLeft(stations: Station[], simulation: TrainSimulationState)
   const start = stationPercent(currentIndex, stations.length);
   const end = stationPercent(nextIndex >= 0 ? nextIndex : currentIndex, stations.length);
   return simulation.mode === "running_between_stations" ? start + (end - start) * simulation.progressOnSegment : start;
+}
+
+function getSegmentDurationMs(simulation: TrainSimulationState, stationDurationSeconds: number): number {
+  return simulation.fastMode ? 4_000 : Math.round((stationDurationSeconds * 1000) / 5);
+}
+
+function getRemainingSegmentMs(startedAt: number, simulation: TrainSimulationState, stationDurationSeconds: number): number {
+  if (!startedAt) return 0;
+  return Math.max(0, getSegmentDurationMs(simulation, stationDurationSeconds) - (Date.now() - startedAt));
+}
+
+function getRealtimeBlockedReason(): string {
+  if (typeof window === "undefined") return "";
+  const isLocalhost = ["localhost", "127.0.0.1", "::1"].includes(window.location.hostname);
+  if (window.isSecureContext || isLocalhost) return "";
+  return "手機瀏覽器用 http://192.168... 開啟時不是 secure context，麥克風/WebRTC Realtime 可能會被瀏覽器擋下；目前會改用文字 fallback。要測語音需用 HTTPS 或 localhost/tunnel。";
 }
 
 function voiceStatusLabel(status: VoiceStatus, language: GuideLanguage): string {

@@ -35,6 +35,12 @@ export class RealtimeRailClient {
     this.callbacks.onStatus("connecting");
 
     try {
+      if (!window.isSecureContext && !["localhost", "127.0.0.1", "::1"].includes(window.location.hostname)) {
+        throw new Error("Realtime voice requires HTTPS on mobile/LAN browsers. Use text fallback or open the app through HTTPS.");
+      }
+      if (!navigator.mediaDevices?.getUserMedia) {
+        throw new Error("This browser does not expose microphone access in the current context.");
+      }
       const token = await createRealtimeSession(journeyId, routeId, language, simulation);
       if (!token.value) {
         this.callbacks.onStatus("fallback");

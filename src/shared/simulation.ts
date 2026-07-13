@@ -2,7 +2,7 @@ import { getRouteStations, getStationGuideScript } from "./seedData";
 import type { PendingQuestion, TrainSimulationState } from "./types";
 
 export const DEFAULT_ROUTE_ID = "tra-pingxi";
-export const NORMAL_TRAVEL_MS = 20_000;
+export const NORMAL_TRAVEL_MS = 45_000;
 export const FAST_TRAVEL_MS = 5_000;
 
 export function createInitialSimulation(routeId = DEFAULT_ROUTE_ID, fastMode = false): TrainSimulationState {

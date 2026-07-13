@@ -80,6 +80,7 @@ export interface PendingQuestion {
 
 export interface TrainSimulationState {
   mode: SimulationMode;
+  pausedFrom?: Exclude<SimulationMode, "paused">;
   currentStationId: string;
   nextStationId?: string;
   segmentIndex: number;
