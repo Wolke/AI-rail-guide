@@ -4,19 +4,16 @@ import { RealtimeRailClient } from "./lib/realtimeClient";
 import { saveJourneyState } from "./lib/storage";
 import { getRouteStations, getStationGuideScript } from "./shared/seedData";
 import {
-  advanceTrain,
+  buildTourContext,
   classifyPendingQuestion,
-  completeCurrentNarrationSegment,
-  completePendingQuestionAnswer,
-  createInitialSimulation,
-  skipCurrentStation,
-  startSimulation,
-  toggleFastMode
-} from "./shared/simulation";
-import type { GuideLanguage, JourneyState, PendingQuestion, Station, TrainSimulationState } from "./shared/types";
+  createInitialTourState,
+  getSegmentDurationMs,
+  reduceTourEvent
+} from "./shared/tourOrchestrator";
+import type { TourCommand, TourEvent, TourPhase, TourState } from "./shared/tourOrchestrator";
+import type { GuideLanguage, JourneyState, PendingQuestion, Station } from "./shared/types";
 
 type VoiceStatus = "idle" | "connecting" | "connected" | "fallback" | "error";
-type ActiveResponse = "none" | "segment" | "question" | "clarification";
 
 const routeId = "tra-pingxi";
 
@@ -26,7 +23,7 @@ const copy = {
     start: "開始模擬",
     pause: "暫停",
     resume: "繼續",
-    skip: "跳過本站",
+    skip: "跳到下一站",
     fast: "快速模式",
     normal: "正常模式",
     current: "目前站",
@@ -43,7 +40,7 @@ const copy = {
     start: "Start demo",
     pause: "Pause",
     resume: "Resume",
-    skip: "Skip stop",
+    skip: "Jump to next station",
     fast: "Fast mode",
     normal: "Normal mode",
     current: "Current",
@@ -59,8 +56,7 @@ const copy = {
 
 export function App() {
   const [journey, setJourney] = useState<JourneyState | null>(null);
-  const [simulation, setSimulation] = useState<TrainSimulationState>(() => createInitialSimulation(routeId));
-  const [language, setLanguage] = useState<GuideLanguage>("zh-TW");
+  const [tourState, setTourState] = useState<TourState>(() => createInitialTourState(routeId));
   const [voiceStatus, setVoiceStatus] = useState<VoiceStatus>("idle");
   const [feed, setFeed] = useState<string[]>([
     "這版 Demo 會讓一台假列車沿平溪線行駛；AI 會把每站導覽講到段落邊界，再處理使用者問題。"
@@ -68,231 +64,233 @@ export function App() {
   const [input, setInput] = useState("");
   const [languageState, setLanguageState] = useState("已套用");
   const realtime = useRef<RealtimeRailClient | null>(null);
+  const tourStateRef = useRef(tourState);
+  const voiceStatusRef = useRef(voiceStatus);
+  const journeyRef = useRef(journey);
+  const timers = useRef<{ travel?: number; fallback?: number; boundary?: number }>({});
   const routeStations = useMemo(() => getRouteStations(routeId), []);
-  const activeResponse = useRef<ActiveResponse>("none");
-  const activeResponseStartedAt = useRef(0);
-  const lastGuideKey = useRef("");
-  const fallbackTimer = useRef<number | null>(null);
-  const responseBoundaryTimer = useRef<number | null>(null);
-  const simulationRef = useRef(simulation);
-  const languageRef = useRef(language);
 
+  const language = tourState.language;
   const c = copy[language];
-  const currentStation = findStation(routeStations, simulation.currentStationId);
-  const nextStation = findStation(routeStations, simulation.nextStationId);
-  const guideScript = getStationGuideScript(simulation.currentStationId);
+  const currentStation = findStation(routeStations, tourState.currentStationId);
+  const nextStation = findStation(routeStations, tourState.nextStationId);
+  const guideScript = getStationGuideScript(tourState.currentStationId);
   const localizedScript = guideScript ? (language === "en-US" ? guideScript.en : guideScript.zh) : undefined;
-  const currentSegment = localizedScript?.segments[simulation.stationNarrationIndex] ?? "";
   const segmentCount = localizedScript?.segments.length ?? 0;
-  const trainLeft = computeTrainLeft(routeStations, simulation);
+  const trainLeft = computeTrainLeft(routeStations, tourState);
   const realtimeBlockedReason = getRealtimeBlockedReason();
 
   useEffect(() => {
-    simulationRef.current = simulation;
-    realtime.current?.setSimulation(simulation);
-  }, [simulation]);
+    tourStateRef.current = tourState;
+  }, [tourState]);
 
   useEffect(() => {
-    languageRef.current = language;
-  }, [language]);
+    voiceStatusRef.current = voiceStatus;
+  }, [voiceStatus]);
+
+  useEffect(() => {
+    journeyRef.current = journey;
+  }, [journey]);
+
+  useEffect(() => {
+    return () => {
+      clearAllTimers();
+      realtime.current?.disconnect();
+    };
+  }, []);
 
   const appendFeed = (message: string) => {
     setFeed((items) => [message, ...items].slice(0, 14));
   };
 
-  const setSimulationState = (updater: (state: TrainSimulationState) => TrainSimulationState) => {
-    setSimulation((previous) => {
-      const next = updater(previous);
-      realtime.current?.setSimulation(next);
-      return next;
-    });
+  const dispatchTourEvent = (event: TourEvent) => {
+    const transition = reduceTourEvent(tourStateRef.current, event);
+    tourStateRef.current = transition.state;
+    setTourState(transition.state);
+    executeCommands(transition.commands, transition.state);
   };
 
   const beginSimulation = async () => {
-    const response = journey ? null : await startJourney(routeId);
-    const activeJourney = journey ?? response?.initialState ?? null;
+    const response = journeyRef.current ? null : await startJourney(routeId);
+    const activeJourney = journeyRef.current ?? response?.initialState ?? null;
     if (response) {
       setJourney(response.initialState);
       await saveJourneyState(response.initialState);
     }
     if (!activeJourney) return;
 
-    const nextSimulation = startSimulation(simulation.mode === "completed" ? createInitialSimulation(routeId, simulation.fastMode) : simulation);
-    setSimulation(nextSimulation);
     appendFeed(language === "en-US" ? "The train simulation has started." : "列車模擬已開始。");
-
     if (!realtime.current) {
-      realtime.current = new RealtimeRailClient({
-        onStatus: setVoiceStatus,
-        onMessage: (message) => {
-          if (message.trim()) appendFeed(message);
-        },
-        onTranscript: (text) => capturePendingQuestion(text),
-        onResponseDone: () => handleResponseDone(),
-        onError: appendFeed
-      });
-      await realtime.current.connect(activeJourney.journeyId, routeId, language, nextSimulation);
+      realtime.current = createRealtimeClient();
+      await realtime.current.connect(activeJourney.journeyId, routeId, language);
       realtime.current.updateGuideTurnMode();
+      realtime.current.syncContext(buildTourContext(tourStateRef.current));
     }
+    dispatchTourEvent({ type: "START" });
   };
 
   const pauseOrResume = () => {
-    if (simulation.mode === "paused") {
-      lastGuideKey.current = "";
-      realtime.current?.resumeOutput();
-      setSimulationState((state) => ({ ...state, mode: state.pausedFrom ?? "narrating_station", pausedFrom: undefined }));
-      return;
-    }
-    realtime.current?.stopOutput();
-    clearFallbackTimer();
-    clearResponseBoundaryTimer();
-    activeResponse.current = "none";
-    setSimulationState((state) => ({ ...state, mode: "paused", pausedFrom: state.mode === "paused" ? state.pausedFrom : state.mode }));
+    dispatchTourEvent({ type: tourStateRef.current.phase === "paused" ? "RESUME" : "PAUSE" });
   };
 
   const skipStation = () => {
-    realtime.current?.cancelResponse();
-    realtime.current?.resumeOutput();
-    clearFallbackTimer();
-    clearResponseBoundaryTimer();
-    activeResponse.current = "none";
-    lastGuideKey.current = "";
-    setSimulationState((state) => skipCurrentStation(state, routeId));
+    dispatchTourEvent({ type: "SKIP_TO_NEXT_STATION" });
     appendFeed(language === "en-US" ? "Jumped to the next station. The train keeps moving forward." : "已跳到下一站，列車會繼續往後行駛。");
   };
 
   const changeLanguage = async (value: GuideLanguage) => {
-    setLanguage(value);
     setLanguageState(value === "en-US" ? "Applying" : "套用中");
-    if (journey && realtime.current) {
+    dispatchTourEvent({ type: "LANGUAGE_CHANGED", language: value });
+    if (journeyRef.current && realtime.current) {
       realtime.current.disconnect();
-      realtime.current = new RealtimeRailClient({
-        onStatus: setVoiceStatus,
-        onMessage: (message) => {
-          if (message.trim()) appendFeed(message);
-        },
-        onTranscript: (text) => capturePendingQuestion(text),
-        onResponseDone: () => handleResponseDone(),
-        onError: appendFeed
-      });
-      await realtime.current.connect(journey.journeyId, routeId, value, simulation);
+      realtime.current = createRealtimeClient();
+      await realtime.current.connect(journeyRef.current.journeyId, routeId, value);
       realtime.current.updateGuideTurnMode();
+      realtime.current.syncContext(buildTourContext({ ...tourStateRef.current, language: value }));
     }
     setLanguageState(value === "en-US" ? "Applied" : "已套用");
-    lastGuideKey.current = "";
   };
 
   const sendTypedQuestion = async () => {
     const text = input.trim();
     if (!text) return;
     setInput("");
-    const pending = classifyPendingQuestion(text, simulationRef.current.stationNarrationIndex);
+    const pending = classifyPendingQuestion(text, tourStateRef.current.guideSegmentIndex);
     const nextPending: PendingQuestion =
-      pending.status === "none" ? { status: "clear_question", text, capturedAtSegment: simulation.stationNarrationIndex } : pending;
-    setSimulationState((state) => ({ ...state, pendingQuestion: nextPending }));
+      pending.status === "none" ? { status: "clear_question", text, capturedAtSegment: tourStateRef.current.guideSegmentIndex } : pending;
+    dispatchTourEvent({ type: "QUESTION_CAPTURED", pendingQuestion: nextPending });
     appendFeed(language === "en-US" ? `Question received; answering after this segment: ${text}` : `問題已收到，段落後回答：${text}`);
   };
 
   const capturePendingQuestion = (text: string) => {
-    const pending = classifyPendingQuestion(text, simulationRef.current.stationNarrationIndex);
+    const pending = classifyPendingQuestion(text, tourStateRef.current.guideSegmentIndex);
     if (pending.status === "none") return;
-    setSimulationState((state) => {
-      if (state.pendingQuestion.status === "clear_question") return state;
-      return { ...state, pendingQuestion: pending };
-    });
+    dispatchTourEvent({ type: "QUESTION_CAPTURED", pendingQuestion: pending });
     appendFeed(
       pending.status === "clear_question"
-        ? languageRef.current === "en-US"
+        ? tourStateRef.current.language === "en-US"
           ? "A question was captured. The guide will answer after this segment."
           : "偵測到明確問題，導遊會在段落結束後回答。"
-        : languageRef.current === "en-US"
+        : tourStateRef.current.language === "en-US"
           ? "A possible question was captured. The guide will clarify after this segment."
           : "偵測到可能的提問，導遊會在段落結束後確認。"
     );
   };
 
-  const handleResponseDone = () => {
-    const kind = activeResponse.current;
-    if (kind === "segment") {
-      const remainingMs = getRemainingSegmentMs(activeResponseStartedAt.current, simulationRef.current, getStationGuideScript(simulationRef.current.currentStationId)?.durationSeconds ?? 180);
-      if (remainingMs > 0) {
-        clearResponseBoundaryTimer();
-        responseBoundaryTimer.current = window.setTimeout(() => completeActiveResponse(), remainingMs);
-        return;
+  const handleRealtimeResponseDone = (responseId?: string) => {
+    const state = tourStateRef.current;
+    if (!responseId || state.activeResponseId !== responseId) return;
+    if (state.activeResponseKind === "guide") {
+      const remainingMs = Math.max(0, getSegmentDurationMs(state) - (Date.now() - (state.activeResponseStartedAt ?? 0)));
+      clearTimer("boundary");
+      timers.current.boundary = window.setTimeout(() => dispatchTourEvent({ type: "GUIDE_RESPONSE_DONE", responseId }), remainingMs);
+      return;
+    }
+    dispatchTourEvent({ type: "QUESTION_RESPONSE_DONE", responseId });
+  };
+
+  const executeCommands = (commands: TourCommand[], state: TourState) => {
+    for (const command of commands) {
+      switch (command.type) {
+        case "CLEAR_TIMERS":
+          clearAllTimers();
+          break;
+        case "START_TRAVEL_TIMER":
+          startTravelTimer();
+          break;
+        case "SYNC_CONTEXT":
+          realtime.current?.syncContext(command.context);
+          break;
+        case "CANCEL_RESPONSE":
+          realtime.current?.cancelResponse();
+          break;
+        case "MUTE_OUTPUT":
+          realtime.current?.muteOutput();
+          break;
+        case "RESUME_OUTPUT":
+          realtime.current?.resumeOutput();
+          break;
+        case "SEND_GUIDE_SEGMENT":
+          appendFeed(
+            command.context.language === "en-US"
+              ? `Guide: ${command.segmentLabel}`
+              : `導覽：${command.segmentLabel.replace(" ", " 第 ")} 段`
+          );
+          if (voiceStatusRef.current === "connected") {
+            realtime.current?.sendGuideSegment(command.context, command.segmentText, command.segmentLabel, command.responseId);
+          } else {
+            appendFeed(`AI：${command.segmentText}`);
+            scheduleFallbackDone(command.responseId, getSegmentDurationMs(state), "GUIDE_RESPONSE_DONE");
+          }
+          break;
+        case "ANSWER_PENDING_QUESTION":
+          if (voiceStatusRef.current === "connected") {
+            realtime.current?.answerQuestion(command.context, command.question, command.responseId);
+          } else {
+            void sendFallbackChat({
+              journeyId: journeyRef.current?.journeyId,
+              message: command.question,
+              language: command.context.language,
+              currentStationId: command.context.currentStationId,
+              nextStationId: command.context.nextStationId
+            }).then((response) => {
+              appendFeed(`AI：${response.text}`);
+              dispatchTourEvent({ type: "QUESTION_RESPONSE_DONE", responseId: command.responseId });
+            });
+          }
+          break;
+        case "ASK_QUESTION_CLARIFICATION":
+          if (voiceStatusRef.current === "connected") {
+            realtime.current?.askQuestionClarification(command.context, command.question, command.responseId);
+          } else {
+            appendFeed(command.context.language === "en-US" ? "AI: Which part would you like to ask about?" : "AI：你剛剛想問的是哪一個部分？");
+            dispatchTourEvent({ type: "QUESTION_RESPONSE_DONE", responseId: command.responseId });
+          }
+          break;
       }
     }
-    completeActiveResponse();
   };
 
-  const completeActiveResponse = () => {
-    const kind = activeResponse.current;
-    activeResponse.current = "none";
-    if (kind === "segment") {
-      setSimulationState((state) => completeCurrentNarrationSegment(state, routeId));
-    } else if (kind === "question" || kind === "clarification") {
-      setSimulationState((state) => completePendingQuestionAnswer(state, routeId));
-    }
-  };
-
-  useEffect(() => {
-    if (simulation.mode !== "running_between_stations") return;
-    const id = window.setInterval(() => {
-      setSimulationState((state) => advanceTrain(state, 200, routeId));
+  const startTravelTimer = () => {
+    clearTimer("travel");
+    timers.current.travel = window.setInterval(() => {
+      dispatchTourEvent({ type: "TRAVEL_TICK", deltaMs: 200 });
     }, 200);
-    return () => window.clearInterval(id);
-  }, [simulation.mode]);
+  };
 
-  useEffect(() => {
-    if (simulation.mode !== "narrating_station" || !currentSegment || !currentStation) return;
-    const key = `${simulation.currentStationId}:${simulation.stationNarrationIndex}:${language}`;
-    if (lastGuideKey.current === key) return;
-    lastGuideKey.current = key;
-    activeResponse.current = "segment";
-    activeResponseStartedAt.current = Date.now();
-    appendFeed(
-      language === "en-US"
-        ? `Guide: ${currentStation.name} segment ${simulation.stationNarrationIndex + 1}/${segmentCount}`
-        : `導覽：${currentStation.name} 第 ${simulation.stationNarrationIndex + 1}/${segmentCount} 段`
-    );
-    if (voiceStatus === "connected") {
-      realtime.current?.sendGuideSegment(currentSegment, `${currentStation.name} ${simulation.stationNarrationIndex + 1}/${segmentCount}`);
-    } else {
-      appendFeed(`AI：${currentSegment}`);
-      scheduleFallbackDone(getSegmentDurationMs(simulation, guideScript?.durationSeconds ?? 180));
-    }
-  }, [currentSegment, currentStation?.id, language, segmentCount, simulation.currentStationId, simulation.fastMode, simulation.mode, simulation.stationNarrationIndex, voiceStatus]);
+  const scheduleFallbackDone = (responseId: string, delayMs: number, eventType: "GUIDE_RESPONSE_DONE" | "QUESTION_RESPONSE_DONE") => {
+    clearTimer("fallback");
+    timers.current.fallback = window.setTimeout(() => {
+      dispatchTourEvent({ type: eventType, responseId } as TourEvent);
+    }, delayMs);
+  };
 
-  useEffect(() => {
-    if (simulation.mode !== "answering_pending_question" || !currentStation) return;
-    const pending = simulation.pendingQuestion;
-    if (pending.status === "clear_question") {
-      activeResponse.current = "question";
-      activeResponseStartedAt.current = Date.now();
-      if (voiceStatus === "connected") {
-        realtime.current?.answerPendingQuestion(pending.text, currentStation.name);
-      } else {
-        void sendFallbackChat({
-          journeyId: journey?.journeyId,
-          message: pending.text,
-          language,
-          currentStationId: currentStation.id,
-          nextStationId: nextStation?.id
-        }).then((response) => {
-          appendFeed(`AI：${response.text}`);
-          handleResponseDone();
-        });
-      }
-    } else if (pending.status === "unclear_question") {
-      activeResponse.current = "clarification";
-      activeResponseStartedAt.current = Date.now();
-      if (voiceStatus === "connected") {
-        realtime.current?.askQuestionClarification(pending.text);
-      } else {
-        appendFeed(language === "en-US" ? "AI: Which part would you like to ask about?" : "AI：你剛剛想問的是哪一個部分？");
-        handleResponseDone();
-      }
+  const clearTimer = (key: keyof typeof timers.current) => {
+    const timer = timers.current[key];
+    if (timer != null) {
+      if (key === "travel") window.clearInterval(timer);
+      else window.clearTimeout(timer);
+      timers.current[key] = undefined;
     }
-  }, [currentStation?.id, journey?.journeyId, language, nextStation?.id, simulation.mode, simulation.pendingQuestion, voiceStatus]);
+  };
+
+  function clearAllTimers() {
+    clearTimer("travel");
+    clearTimer("fallback");
+    clearTimer("boundary");
+  }
+
+  function createRealtimeClient() {
+    return new RealtimeRailClient({
+      onStatus: setVoiceStatus,
+      onMessage: (message) => {
+        if (message.trim()) appendFeed(message);
+      },
+      onTranscript: capturePendingQuestion,
+      onResponseDone: handleRealtimeResponseDone,
+      onError: appendFeed
+    });
+  }
 
   return (
     <main className="app-shell">
@@ -321,7 +319,7 @@ export function App() {
           </div>
           {routeStations.map((station, index) => (
             <div className="station-node" key={station.id} style={{ left: `${stationPercent(index, routeStations.length)}%` }}>
-              <span className={station.id === simulation.currentStationId ? "node-dot active" : "node-dot"} />
+              <span className={station.id === tourState.currentStationId ? "node-dot active" : "node-dot"} />
               <small>{station.name}</small>
             </div>
           ))}
@@ -330,33 +328,33 @@ export function App() {
         <div className="control-grid">
           <Metric label={c.current} value={currentStation?.name ?? "-"} />
           <Metric label={c.next} value={nextStation?.name ?? "-"} />
-          <Metric label={c.mode} value={modeLabel(simulation.mode, language)} />
-          <Metric label={c.segment} value={`${simulation.stationNarrationIndex + 1}/${Math.max(segmentCount, 1)}`} />
+          <Metric label={c.mode} value={modeLabel(tourState.phase, language)} />
+          <Metric label={c.segment} value={`${tourState.guideSegmentIndex + 1}/${Math.max(segmentCount, 1)}`} />
         </div>
 
         <div className="progress-row">
           <span>{c.progress}</span>
           <div className="progress-bar">
-            <i style={{ width: `${Math.round(simulation.progressOnSegment * 100)}%` }} />
+            <i style={{ width: `${Math.round(tourState.travelProgress * 100)}%` }} />
           </div>
-          <strong>{Math.round(simulation.progressOnSegment * 100)}%</strong>
+          <strong>{Math.round(tourState.travelProgress * 100)}%</strong>
         </div>
 
         <div className="actions">
-          {simulation.mode === "stopped" || simulation.mode === "completed" ? (
+          {tourState.phase === "idle" || tourState.phase === "completed" ? (
             <button className="primary" onClick={() => void beginSimulation()}>
               {c.start}
             </button>
           ) : (
             <button className="secondary" onClick={pauseOrResume}>
-              {simulation.mode === "paused" ? c.resume : c.pause}
+              {tourState.phase === "paused" ? c.resume : c.pause}
             </button>
           )}
-          <button className="ghost" onClick={skipStation} disabled={simulation.mode === "stopped" || simulation.mode === "completed"}>
+          <button className="ghost" onClick={skipStation} disabled={tourState.phase === "idle" || tourState.phase === "completed"}>
             {c.skip}
           </button>
-          <button className="ghost" onClick={() => setSimulationState(toggleFastMode)}>
-            {simulation.fastMode ? c.normal : c.fast}
+          <button className="ghost" onClick={() => dispatchTourEvent({ type: "TOGGLE_FAST_MODE" })}>
+            {tourState.fastMode ? c.normal : c.fast}
           </button>
           <span className="meta">{languageState}</span>
         </div>
@@ -372,8 +370,8 @@ export function App() {
         </div>
         <div className="story-panel">
           <p className="eyebrow">Pending Question</p>
-          <h2>{pendingLabel(simulation.pendingQuestion.status, language)}</h2>
-          <p>{simulation.pendingQuestion.text || (language === "en-US" ? "No passenger question is waiting." : "目前沒有等待處理的旅客問題。")}</p>
+          <h2>{pendingLabel(tourState.pendingQuestion.status, language)}</h2>
+          <p>{tourState.pendingQuestion.text || (language === "en-US" ? "No passenger question is waiting." : "目前沒有等待處理的旅客問題。")}</p>
         </div>
       </section>
 
@@ -397,27 +395,6 @@ export function App() {
       </section>
     </main>
   );
-
-  function scheduleFallbackDone(delayMs: number) {
-    clearFallbackTimer();
-    fallbackTimer.current = window.setTimeout(() => {
-      handleResponseDone();
-    }, delayMs);
-  }
-
-  function clearFallbackTimer() {
-    if (fallbackTimer.current != null) {
-      window.clearTimeout(fallbackTimer.current);
-      fallbackTimer.current = null;
-    }
-  }
-
-  function clearResponseBoundaryTimer() {
-    if (responseBoundaryTimer.current != null) {
-      window.clearTimeout(responseBoundaryTimer.current);
-      responseBoundaryTimer.current = null;
-    }
-  }
 }
 
 function Metric({ label, value }: { label: string; value: string }) {
@@ -437,21 +414,12 @@ function stationPercent(index: number, length: number): number {
   return length <= 1 ? 0 : (index / (length - 1)) * 100;
 }
 
-function computeTrainLeft(stations: Station[], simulation: TrainSimulationState): number {
-  const currentIndex = Math.max(0, stations.findIndex((station) => station.id === simulation.currentStationId));
-  const nextIndex = simulation.nextStationId ? stations.findIndex((station) => station.id === simulation.nextStationId) : currentIndex;
+function computeTrainLeft(stations: Station[], state: TourState): number {
+  const currentIndex = Math.max(0, stations.findIndex((station) => station.id === state.currentStationId));
+  const nextIndex = state.nextStationId ? stations.findIndex((station) => station.id === state.nextStationId) : currentIndex;
   const start = stationPercent(currentIndex, stations.length);
   const end = stationPercent(nextIndex >= 0 ? nextIndex : currentIndex, stations.length);
-  return simulation.mode === "running_between_stations" ? start + (end - start) * simulation.progressOnSegment : start;
-}
-
-function getSegmentDurationMs(simulation: TrainSimulationState, stationDurationSeconds: number): number {
-  return simulation.fastMode ? 4_000 : Math.round((stationDurationSeconds * 1000) / 5);
-}
-
-function getRemainingSegmentMs(startedAt: number, simulation: TrainSimulationState, stationDurationSeconds: number): number {
-  if (!startedAt) return 0;
-  return Math.max(0, getSegmentDurationMs(simulation, stationDurationSeconds) - (Date.now() - startedAt));
+  return state.phase === "traveling" ? start + (end - start) * state.travelProgress : start;
 }
 
 function getRealtimeBlockedReason(): string {
@@ -479,20 +447,20 @@ function voiceStatusLabel(status: VoiceStatus, language: GuideLanguage): string 
   return language === "en-US" ? en[status] : zh[status];
 }
 
-function modeLabel(mode: TrainSimulationState["mode"], language: GuideLanguage): string {
-  const zh: Record<TrainSimulationState["mode"], string> = {
-    stopped: "尚未開始",
-    running_between_stations: "列車行駛中",
-    narrating_station: "到站導覽",
-    answering_pending_question: "回答暫存問題",
+function modeLabel(mode: TourPhase, language: GuideLanguage): string {
+  const zh: Record<TourPhase, string> = {
+    idle: "尚未開始",
+    traveling: "列車行駛中",
+    narrating: "到站導覽",
+    answering_question: "回答暫存問題",
     paused: "已暫停",
     completed: "路線完成"
   };
-  const en: Record<TrainSimulationState["mode"], string> = {
-    stopped: "Stopped",
-    running_between_stations: "Running",
-    narrating_station: "Narrating",
-    answering_pending_question: "Answering",
+  const en: Record<TourPhase, string> = {
+    idle: "Idle",
+    traveling: "Running",
+    narrating: "Narrating",
+    answering_question: "Answering",
     paused: "Paused",
     completed: "Completed"
   };

@@ -1,14 +1,45 @@
 import { callTool, createRealtimeSession } from "./api";
-import { getRouteStations } from "../shared/seedData";
-import type { GuideLanguage, JourneyEventType, JourneyState, TrainSimulationState } from "../shared/types";
+import type { TourContext } from "../shared/tourOrchestrator";
+import type { GuideLanguage, JourneyEventType, JourneyState } from "../shared/types";
 
 type RealtimeStatus = "idle" | "connecting" | "connected" | "fallback" | "error";
+
+export function formatTourContextLine(context: TourContext): string {
+  return [
+    "LATEST_CONTEXT",
+    `routeId=${context.routeId}`,
+    `language=${context.language}`,
+    `phase=${context.phase}`,
+    `currentStationId=${context.currentStationId}`,
+    `currentStationName=${context.currentStationName}`,
+    `nextStationId=${context.nextStationId ?? "none"}`,
+    `nextStationName=${context.nextStationName ?? "none"}`,
+    `guideSegmentIndex=${context.guideSegmentIndex}`,
+    `pendingQuestionStatus=${context.pendingQuestionStatus}`
+  ].join("; ");
+}
+
+export function buildRealtimeSessionInstructions(language: GuideLanguage, routeId: string, context?: TourContext): string {
+  const languageRule =
+    language === "en-US"
+      ? "You must speak English unless the user explicitly requests another language."
+      : "你必須全程使用繁體中文口語回答，除非使用者明確要求其他語言。";
+  const latestContext = context ? formatTourContextLine(context) : `LATEST_CONTEXT routeId=${routeId}; language=${language}; currentStationId=unknown;`;
+  return [
+    languageRule,
+    "You are AI Rail Guide, a professional TRA cultural guide. You are not a generic assistant.",
+    "Always prioritize the newest simulation context over older conversation memory.",
+    latestContext,
+    "If the user jumps to another station, abandon the previous station and continue the guide from the new currentStationId.",
+    "During guide narration, finish the current segment before answering pending passenger questions."
+  ].join("\n");
+}
 
 export interface RealtimeCallbacks {
   onStatus(status: RealtimeStatus): void;
   onMessage(message: string): void;
   onTranscript(text: string): void;
-  onResponseDone(): void;
+  onResponseDone(responseId?: string): void;
   onError(message: string): void;
 }
 
@@ -21,20 +52,22 @@ export class RealtimeRailClient {
   private journeyId = "";
   private routeId = "";
   private language: GuideLanguage = "zh-TW";
-  private simulation?: TrainSimulationState;
+  private latestContext?: TourContext;
   private lastSyncedContext = "";
+  private lastIssuedResponseId?: string;
 
   constructor(callbacks: RealtimeCallbacks) {
     this.callbacks = callbacks;
   }
 
-  async connect(journeyId: string, routeId: string, language: GuideLanguage, simulation?: TrainSimulationState): Promise<void> {
+  async connect(journeyId: string, routeId: string, language: GuideLanguage): Promise<void> {
     this.disconnect();
     this.journeyId = journeyId;
     this.routeId = routeId;
     this.language = language;
-    this.simulation = simulation;
+    this.latestContext = undefined;
     this.lastSyncedContext = "";
+    this.lastIssuedResponseId = undefined;
     this.callbacks.onStatus("connecting");
 
     try {
@@ -44,7 +77,7 @@ export class RealtimeRailClient {
       if (!navigator.mediaDevices?.getUserMedia) {
         throw new Error("This browser does not expose microphone access in the current context.");
       }
-      const token = await createRealtimeSession(journeyId, routeId, language, simulation);
+      const token = await createRealtimeSession(journeyId, routeId, language);
       if (!token.value) {
         this.callbacks.onStatus("fallback");
         this.callbacks.onError(token.error ?? "Realtime session is unavailable; using text fallback.");
@@ -94,11 +127,6 @@ export class RealtimeRailClient {
     }
   }
 
-  setSimulation(simulation: TrainSimulationState): void {
-    this.simulation = simulation;
-    this.syncSessionContext();
-  }
-
   disconnect(): void {
     this.dc?.close();
     this.pc?.close();
@@ -108,6 +136,8 @@ export class RealtimeRailClient {
     this.micStream = undefined;
     this.audio = undefined;
     this.lastSyncedContext = "";
+    this.lastIssuedResponseId = undefined;
+    this.latestContext = undefined;
   }
 
   sendJourneyEvent(event: JourneyEventType, state: JourneyState): void {
@@ -132,12 +162,18 @@ export class RealtimeRailClient {
     this.sendUserText(text, true);
   }
 
-  sendUserText(text: string, isSystemJourneyEvent = false): void {
+  syncContext(context: TourContext): void {
+    this.latestContext = context;
+    this.syncSessionContext(context);
+  }
+
+  sendUserText(text: string, isSystemJourneyEvent = false, responseId?: string): void {
     if (!this.dc || this.dc.readyState !== "open") {
       this.callbacks.onError("Realtime data channel is not open.");
       return;
     }
     this.resumeOutput();
+    this.lastIssuedResponseId = responseId;
     this.dc.send(
       JSON.stringify({
         type: "conversation.item.create",
@@ -151,12 +187,13 @@ export class RealtimeRailClient {
     this.dc.send(JSON.stringify({ type: "response.create", response: { instructions: this.responseInstructions(isSystemJourneyEvent) } }));
   }
 
-  sendGuideSegment(segmentText: string, segmentLabel: string): void {
-    this.syncSessionContext();
-    const latestContext = this.latestContextLine();
+  sendGuideSegment(context: TourContext, segmentText: string, segmentLabel: string, responseId: string): void {
+    this.syncContext(context);
+    const latestContext = this.latestContextLine(context);
     const text =
-      this.language === "en-US"
+      context.language === "en-US"
         ? [
+            `CONTROL_RESPONSE_ID=${responseId}`,
             latestContext,
             `Guide segment: ${segmentLabel}`,
             segmentText,
@@ -164,38 +201,60 @@ export class RealtimeRailClient {
             "Deliver only this segment as a professional rail guide. Do not answer pending passenger questions until this segment is complete."
           ].join("\n")
         : [
+            `CONTROL_RESPONSE_ID=${responseId}`,
             latestContext,
             `導覽段落：${segmentLabel}`,
             segmentText,
             "這是最新站點 context；如果和先前站點記憶衝突，一律以這裡為準。",
             "請像專業台鐵導遊一樣，只講這一段。講完整段落後停下，不要在段落中途回答旅客問題。"
           ].join("\n");
-    this.sendUserText(text, true);
+    this.sendUserText(text, true, responseId);
   }
 
-  answerPendingQuestion(question: string, stationName: string): void {
+  answerQuestion(context: TourContext, question: string, responseId: string): void {
+    this.syncContext(context);
     const text =
-      this.language === "en-US"
-        ? `A passenger asked during the previous guide segment: "${question}". Answer it now around ${stationName}, then bridge back to the tour.`
-        : `旅客剛剛在上一段導覽中問：「${question}」。現在請先回答這個問題，地點脈絡是 ${stationName}，回答後自然接回導覽。`;
-    this.sendUserText(text, false);
+      context.language === "en-US"
+        ? [
+            `CONTROL_RESPONSE_ID=${responseId}`,
+            this.latestContextLine(context),
+            `A passenger asked during the previous guide segment: "${question}".`,
+            `Answer it now around ${context.currentStationName}, then bridge back to the tour.`
+          ].join("\n")
+        : [
+            `CONTROL_RESPONSE_ID=${responseId}`,
+            this.latestContextLine(context),
+            `旅客剛剛在上一段導覽中問：「${question}」。`,
+            `現在請先回答這個問題，地點脈絡是 ${context.currentStationName}，回答後自然接回導覽。`
+          ].join("\n");
+    this.sendUserText(text, false, responseId);
   }
 
-  askQuestionClarification(question: string): void {
+  askQuestionClarification(context: TourContext, question: string, responseId: string): void {
+    this.syncContext(context);
     const text =
-      this.language === "en-US"
-        ? `The passenger seemed to ask a question, but it was unclear: "${question}". Ask one concise clarification question.`
-        : `旅客剛剛像是想問問題，但不夠清楚：「${question}」。請用一句話反問他想問哪一部分。`;
-    this.sendUserText(text, false);
+      context.language === "en-US"
+        ? [
+            `CONTROL_RESPONSE_ID=${responseId}`,
+            this.latestContextLine(context),
+            `The passenger seemed to ask a question, but it was unclear: "${question}". Ask one concise clarification question.`
+          ].join("\n")
+        : [
+            `CONTROL_RESPONSE_ID=${responseId}`,
+            this.latestContextLine(context),
+            `旅客剛剛像是想問問題，但不夠清楚：「${question}」。請用一句話反問他想問哪一部分。`
+          ].join("\n");
+    this.sendUserText(text, false, responseId);
   }
 
   cancelResponse(): void {
     if (this.dc?.readyState === "open") {
       this.dc.send(JSON.stringify({ type: "response.cancel" }));
     }
+    this.lastIssuedResponseId = undefined;
   }
 
-  stopOutput(): void {
+  muteOutput(): void {
     this.cancelResponse();
     if (this.audio) {
       this.audio.muted = true;
@@ -231,16 +290,16 @@ export class RealtimeRailClient {
     );
   }
 
-  private syncSessionContext(): void {
+  private syncSessionContext(context: TourContext): void {
     if (this.dc?.readyState !== "open") return;
-    const latestContext = this.latestContextLine();
+    const latestContext = this.latestContextLine(context);
     if (latestContext === this.lastSyncedContext) return;
     this.lastSyncedContext = latestContext;
     this.dc.send(
       JSON.stringify({
         type: "session.update",
         session: {
-          instructions: this.sessionInstructions(),
+          instructions: this.sessionInstructions(context),
           audio: {
             input: {
               turn_detection: {
@@ -262,59 +321,30 @@ export class RealtimeRailClient {
         ? [
             "Mission briefing: You are AI Rail Guide, a TRA cultural rail companion for the Pingxi Line.",
             "Your job is to narrate local station stories, react to GPS journey events, and answer user interruptions.",
-          `journeyId=${this.journeyId}; routeId=${this.routeId}; language=en-US.`,
-          this.simulation ? `simulation=${JSON.stringify(this.simulation)}` : "",
-          "Call get_guide_context before your first substantive guide segment if you need context."
+            `journeyId=${this.journeyId}; routeId=${this.routeId}; language=en-US.`,
+            this.latestContext ? this.latestContextLine(this.latestContext) : "",
+            "Call get_guide_context before your first substantive guide segment if you need context."
           ].join("\n")
         : [
             "任務簡報：你是 AI Rail Guide，平溪線台鐵文史軌道伴遊。",
             "你的工作是根據 GPS 旅程事件主動說站點故事、回答使用者插話，並在合適時提供下車探索建議。",
-          `journeyId=${this.journeyId}; routeId=${this.routeId}; language=zh-TW。`,
-          this.simulation ? `simulation=${JSON.stringify(this.simulation)}。` : "",
-          "第一次正式導覽前，如果需要上下文，請呼叫 get_guide_context。全程使用繁體中文。"
+            `journeyId=${this.journeyId}; routeId=${this.routeId}; language=zh-TW。`,
+            this.latestContext ? this.latestContextLine(this.latestContext) : "",
+            "第一次正式導覽前，如果需要上下文，請呼叫 get_guide_context。全程使用繁體中文。"
           ].join("\n");
     this.sendUserText(briefing, true);
   }
 
-  private sessionInstructions(): string {
-    const languageRule =
-      this.language === "en-US"
-        ? "You must speak English unless the user explicitly requests another language."
-        : "你必須全程使用繁體中文口語回答，除非使用者明確要求其他語言。";
-    const latestContext = this.latestContextLine();
-    return [
-      languageRule,
-      "You are AI Rail Guide, a professional TRA cultural guide. You are not a generic assistant.",
-      "Always prioritize the newest simulation context over older conversation memory.",
-      latestContext,
-      "If the user jumps to another station, abandon the previous station and continue the guide from the new currentStationId.",
-      "During guide narration, finish the current segment before answering pending passenger questions."
-    ].join("\n");
+  private sessionInstructions(context?: TourContext): string {
+    return buildRealtimeSessionInstructions(this.language, this.routeId, context ?? this.latestContext);
   }
 
-  private latestContextLine(): string {
-    if (!this.simulation) {
-      return `LATEST_CONTEXT routeId=${this.routeId}; language=${this.language}; currentStationId=unknown;`;
-    }
-    const routeStations = getRouteStations(this.routeId);
-    const currentStationName = routeStations.find((station) => station.id === this.simulation?.currentStationId)?.name ?? this.simulation.currentStationId;
-    const nextStationName = routeStations.find((station) => station.id === this.simulation?.nextStationId)?.name ?? this.simulation.nextStationId ?? "none";
-    return [
-      "LATEST_CONTEXT",
-      `routeId=${this.routeId}`,
-      `language=${this.language}`,
-      `mode=${this.simulation.mode}`,
-      `currentStationId=${this.simulation.currentStationId}`,
-      `currentStationName=${currentStationName}`,
-      `nextStationId=${this.simulation.nextStationId ?? "none"}`,
-      `nextStationName=${nextStationName}`,
-      `stationNarrationIndex=${this.simulation.stationNarrationIndex}`,
-      `pendingQuestionStatus=${this.simulation.pendingQuestion.status}`
-    ].join("; ");
+  private latestContextLine(context: TourContext): string {
+    return formatTourContextLine(context);
   }
 
   private responseInstructions(isSystemJourneyEvent: boolean): string {
-    const latestContext = this.latestContextLine();
+    const latestContext = this.latestContext ? this.latestContextLine(this.latestContext) : `LATEST_CONTEXT routeId=${this.routeId}; language=${this.language}; currentStationId=unknown;`;
     if (this.language === "en-US") {
       return isSystemJourneyEvent
         ? `Speak English. Be a TRA rail guide. Use the newest station context only. ${latestContext}`
@@ -343,7 +373,9 @@ export class RealtimeRailClient {
     }
 
     if (type === "response.done") {
-      this.callbacks.onResponseDone();
+      const responseId = this.lastIssuedResponseId;
+      this.lastIssuedResponseId = undefined;
+      this.callbacks.onResponseDone(responseId);
     }
 
     if (type === "response.function_call_arguments.done") {
@@ -367,9 +399,7 @@ export class RealtimeRailClient {
       typeof args === "object" && args
         ? { journeyId: this.journeyId, routeId: this.routeId, language: this.language, ...args }
         : { journeyId: this.journeyId, routeId: this.routeId, language: this.language };
-    if (this.simulation) {
-      Object.assign(payload, { simulation: this.simulation });
-    }
+    if (this.latestContext) Object.assign(payload, { tourContext: this.latestContext });
     const output = await callTool(name, payload);
     this.dc?.send(
       JSON.stringify({
