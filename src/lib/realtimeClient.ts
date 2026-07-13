@@ -1,11 +1,13 @@
 import { callTool, createRealtimeSession } from "./api";
-import type { GuideLanguage, JourneyEventType, JourneyState } from "../shared/types";
+import type { GuideLanguage, JourneyEventType, JourneyState, TrainSimulationState } from "../shared/types";
 
 type RealtimeStatus = "idle" | "connecting" | "connected" | "fallback" | "error";
 
 export interface RealtimeCallbacks {
   onStatus(status: RealtimeStatus): void;
   onMessage(message: string): void;
+  onTranscript(text: string): void;
+  onResponseDone(): void;
   onError(message: string): void;
 }
 
@@ -18,20 +20,22 @@ export class RealtimeRailClient {
   private journeyId = "";
   private routeId = "";
   private language: GuideLanguage = "zh-TW";
+  private simulation?: TrainSimulationState;
 
   constructor(callbacks: RealtimeCallbacks) {
     this.callbacks = callbacks;
   }
 
-  async connect(journeyId: string, routeId: string, language: GuideLanguage): Promise<void> {
+  async connect(journeyId: string, routeId: string, language: GuideLanguage, simulation?: TrainSimulationState): Promise<void> {
     this.disconnect();
     this.journeyId = journeyId;
     this.routeId = routeId;
     this.language = language;
+    this.simulation = simulation;
     this.callbacks.onStatus("connecting");
 
     try {
-      const token = await createRealtimeSession(journeyId, routeId, language);
+      const token = await createRealtimeSession(journeyId, routeId, language, simulation);
       if (!token.value) {
         this.callbacks.onStatus("fallback");
         this.callbacks.onError(token.error ?? "Realtime session is unavailable; using text fallback.");
@@ -79,6 +83,10 @@ export class RealtimeRailClient {
       this.callbacks.onStatus("fallback");
       this.callbacks.onError(error instanceof Error ? error.message : "Realtime connection failed; using text fallback.");
     }
+  }
+
+  setSimulation(simulation: TrainSimulationState): void {
+    this.simulation = simulation;
   }
 
   disconnect(): void {
@@ -131,20 +139,81 @@ export class RealtimeRailClient {
     this.dc.send(JSON.stringify({ type: "response.create", response: { instructions: this.responseInstructions(isSystemJourneyEvent) } }));
   }
 
+  sendGuideSegment(segmentText: string, segmentLabel: string): void {
+    const text =
+      this.language === "en-US"
+        ? [
+            `Guide segment: ${segmentLabel}`,
+            segmentText,
+            "Deliver only this segment as a professional rail guide. Do not answer pending passenger questions until this segment is complete."
+          ].join("\n")
+        : [
+            `導覽段落：${segmentLabel}`,
+            segmentText,
+            "請像專業台鐵導遊一樣，只講這一段。講完整段落後停下，不要在段落中途回答旅客問題。"
+          ].join("\n");
+    this.sendUserText(text, true);
+  }
+
+  answerPendingQuestion(question: string, stationName: string): void {
+    const text =
+      this.language === "en-US"
+        ? `A passenger asked during the previous guide segment: "${question}". Answer it now around ${stationName}, then bridge back to the tour.`
+        : `旅客剛剛在上一段導覽中問：「${question}」。現在請先回答這個問題，地點脈絡是 ${stationName}，回答後自然接回導覽。`;
+    this.sendUserText(text, false);
+  }
+
+  askQuestionClarification(question: string): void {
+    const text =
+      this.language === "en-US"
+        ? `The passenger seemed to ask a question, but it was unclear: "${question}". Ask one concise clarification question.`
+        : `旅客剛剛像是想問問題，但不夠清楚：「${question}」。請用一句話反問他想問哪一部分。`;
+    this.sendUserText(text, false);
+  }
+
+  cancelResponse(): void {
+    if (this.dc?.readyState === "open") {
+      this.dc.send(JSON.stringify({ type: "response.cancel" }));
+    }
+  }
+
+  updateGuideTurnMode(): void {
+    if (this.dc?.readyState !== "open") return;
+    this.dc.send(
+      JSON.stringify({
+        type: "session.update",
+        session: {
+          audio: {
+            input: {
+              turn_detection: {
+                type: "semantic_vad",
+                eagerness: "low",
+                create_response: false,
+                interrupt_response: false
+              }
+            }
+          }
+        }
+      })
+    );
+  }
+
   private sendMissionBriefing(): void {
     const briefing =
       this.language === "en-US"
         ? [
             "Mission briefing: You are AI Rail Guide, a TRA cultural rail companion for the Pingxi Line.",
             "Your job is to narrate local station stories, react to GPS journey events, and answer user interruptions.",
-            `journeyId=${this.journeyId}; routeId=${this.routeId}; language=en-US.`,
-            "Call get_guide_context before your first substantive guide segment if you need context."
+          `journeyId=${this.journeyId}; routeId=${this.routeId}; language=en-US.`,
+          this.simulation ? `simulation=${JSON.stringify(this.simulation)}` : "",
+          "Call get_guide_context before your first substantive guide segment if you need context."
           ].join("\n")
         : [
             "任務簡報：你是 AI Rail Guide，平溪線台鐵文史軌道伴遊。",
             "你的工作是根據 GPS 旅程事件主動說站點故事、回答使用者插話，並在合適時提供下車探索建議。",
-            `journeyId=${this.journeyId}; routeId=${this.routeId}; language=zh-TW。`,
-            "第一次正式導覽前，如果需要上下文，請呼叫 get_guide_context。全程使用繁體中文。"
+          `journeyId=${this.journeyId}; routeId=${this.routeId}; language=zh-TW。`,
+          this.simulation ? `simulation=${JSON.stringify(this.simulation)}。` : "",
+          "第一次正式導覽前，如果需要上下文，請呼叫 get_guide_context。全程使用繁體中文。"
           ].join("\n");
     this.sendUserText(briefing, true);
   }
@@ -173,6 +242,14 @@ export class RealtimeRailClient {
       this.callbacks.onMessage(String(event.delta ?? ""));
     }
 
+    if (type === "conversation.item.input_audio_transcription.completed") {
+      this.callbacks.onTranscript(String(event.transcript ?? ""));
+    }
+
+    if (type === "response.done") {
+      this.callbacks.onResponseDone();
+    }
+
     if (type === "response.function_call_arguments.done") {
       await this.handleFunctionCall(event);
     }
@@ -194,6 +271,9 @@ export class RealtimeRailClient {
       typeof args === "object" && args
         ? { journeyId: this.journeyId, routeId: this.routeId, language: this.language, ...args }
         : { journeyId: this.journeyId, routeId: this.routeId, language: this.language };
+    if (this.simulation) {
+      Object.assign(payload, { simulation: this.simulation });
+    }
     const output = await callTool(name, payload);
     this.dc?.send(
       JSON.stringify({

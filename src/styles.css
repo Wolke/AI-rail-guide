@@ -121,6 +121,117 @@ h2 {
   gap: 18px;
 }
 
+.sim-board {
+  border: 1px solid rgba(18, 49, 43, 0.16);
+  border-radius: 8px;
+  background: #fffdf7;
+  padding: 20px;
+  margin-bottom: 18px;
+}
+
+.route-map {
+  position: relative;
+  min-height: 150px;
+  margin: 8px 8px 22px;
+  padding: 54px 0 46px;
+}
+
+.track {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 62px;
+  height: 8px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #8fa59d, #d8c070, #6fb1a4);
+}
+
+.train {
+  position: absolute;
+  top: 38px;
+  z-index: 3;
+  width: 54px;
+  height: 34px;
+  transform: translateX(-50%);
+  transition: left 180ms linear;
+}
+
+.train span {
+  display: block;
+  width: 54px;
+  height: 34px;
+  border: 3px solid #12312b;
+  border-radius: 8px 8px 5px 5px;
+  background: #f0b84a;
+  box-shadow: inset 12px 0 0 #fffdf7, inset -12px 0 0 #5ab7a5;
+}
+
+.station-node {
+  position: absolute;
+  top: 48px;
+  z-index: 2;
+  width: 86px;
+  transform: translateX(-50%);
+  text-align: center;
+}
+
+.station-node small {
+  display: block;
+  margin-top: 20px;
+  color: #42574f;
+  font-size: 0.78rem;
+  font-weight: 800;
+  line-height: 1.2;
+}
+
+.node-dot {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  border: 3px solid #fffdf7;
+  border-radius: 50%;
+  background: #5f766e;
+  box-shadow: 0 0 0 1px rgba(18, 49, 43, 0.3);
+}
+
+.node-dot.active {
+  width: 24px;
+  height: 24px;
+  background: #12312b;
+  box-shadow: 0 0 0 5px rgba(240, 184, 74, 0.38);
+}
+
+.control-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.progress-row {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 12px;
+  align-items: center;
+  margin-top: 16px;
+  color: #4d625c;
+  font-weight: 800;
+}
+
+.progress-bar {
+  height: 12px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #e5e0d2;
+}
+
+.progress-bar i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: #12312b;
+  transition: width 180ms linear;
+}
+
 .journey-panel,
 .story-panel,
 .console {
@@ -320,5 +431,22 @@ h2 {
 
   .station-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .control-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .route-map {
+    min-height: 230px;
+  }
+
+  .station-node {
+    width: 56px;
+  }
+
+  .station-node small {
+    writing-mode: vertical-rl;
+    margin: 18px auto 0;
   }
 }

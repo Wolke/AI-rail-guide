@@ -47,6 +47,48 @@ export interface StationStory {
   sourceNote: string;
 }
 
+export interface LocalizedGuideText {
+  theme: string;
+  summary: string;
+  stopPitch: string;
+  segments: string[];
+}
+
+export interface StationGuideScript {
+  stationId: string;
+  durationSeconds: number;
+  zh: LocalizedGuideText;
+  en: LocalizedGuideText;
+  sourceNote: string;
+}
+
+export type SimulationMode =
+  | "stopped"
+  | "running_between_stations"
+  | "narrating_station"
+  | "answering_pending_question"
+  | "paused"
+  | "completed";
+
+export type PendingQuestionStatus = "none" | "capturing" | "clear_question" | "unclear_question";
+
+export interface PendingQuestion {
+  status: PendingQuestionStatus;
+  text: string;
+  capturedAtSegment?: number;
+}
+
+export interface TrainSimulationState {
+  mode: SimulationMode;
+  currentStationId: string;
+  nextStationId?: string;
+  segmentIndex: number;
+  progressOnSegment: number;
+  stationNarrationIndex: number;
+  pendingQuestion: PendingQuestion;
+  fastMode: boolean;
+}
+
 export interface GpsPoint {
   lat: number;
   lng: number;
@@ -89,6 +131,9 @@ export interface GuideContext {
   nextStation?: Station;
   relevantStories: StationStory[];
   relevantPois: Poi[];
+  guideScript?: StationGuideScript;
+  currentGuideSegment?: string;
+  simulation?: TrainSimulationState;
   routeStationNames: string[];
   taskBrief: string;
 }

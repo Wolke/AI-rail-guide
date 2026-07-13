@@ -1,8 +1,8 @@
 import "dotenv/config";
 import express from "express";
 import { createInitialJourney, evaluateLocation, eventId, markGpsLost } from "../src/shared/geo";
-import { getRoute, getRouteStations, getStationPois, getStationStory, pois, routes, stations } from "../src/shared/seedData";
-import type { GpsPoint, GuideContext, GuideLanguage, JourneyEventType, JourneyState, Station, StationStory } from "../src/shared/types";
+import { getRoute, getRouteStations, getStationGuideScript, getStationPois, getStationStory, routes, stations } from "../src/shared/seedData";
+import type { GpsPoint, GuideContext, GuideLanguage, JourneyEventType, JourneyState, Station, StationStory, TrainSimulationState } from "../src/shared/types";
 
 const app = express();
 const port = Number(process.env.PORT ?? 8787);
@@ -80,6 +80,7 @@ app.post("/api/realtime/session", async (req, res) => {
   const routeId = typeof req.body?.routeId === "string" ? req.body.routeId : "tra-pingxi";
   const journeyId = typeof req.body?.journeyId === "string" ? req.body.journeyId : undefined;
   const language = parseGuideLanguage(req.body?.language);
+  const simulation = parseSimulation(req.body?.simulation);
   const state = journeyId ? journeys.get(journeyId) : undefined;
   const model = process.env.OPENAI_REALTIME_MODEL ?? "gpt-realtime-2.1";
   const voice = process.env.OPENAI_REALTIME_VOICE ?? "marin";
@@ -88,15 +89,18 @@ app.post("/api/realtime/session", async (req, res) => {
     session: {
       type: "realtime",
       model,
-      instructions: buildRealtimeInstructions(routeId, state, language),
+      instructions: buildRealtimeInstructions(routeId, state, language, simulation),
       audio: {
         output: { voice },
         input: {
+          transcription: {
+            model: "gpt-4o-mini-transcribe"
+          },
           turn_detection: {
-            type: "server_vad",
-            threshold: 0.5,
-            prefix_padding_ms: 300,
-            silence_duration_ms: 600
+            type: "semantic_vad",
+            eagerness: "low",
+            create_response: false,
+            interrupt_response: false
           }
         }
       },
@@ -148,8 +152,9 @@ app.post("/api/tools/get_guide_context", (req, res) => {
   const journeyId = String(req.body?.journeyId ?? "");
   const routeId = typeof req.body?.routeId === "string" ? req.body.routeId : journeys.get(journeyId)?.routeId ?? "tra-pingxi";
   const language = parseGuideLanguage(req.body?.language);
+  const simulation = parseSimulation(req.body?.simulation);
   const state = journeys.get(journeyId);
-  res.json({ context: buildGuideContext(routeId, state, language) });
+  res.json({ context: buildGuideContext(routeId, state, language, simulation) });
 });
 
 app.post("/api/tools/get_current_journey_state", (req, res) => {
@@ -204,8 +209,8 @@ function parseGpsPoint(body: unknown): GpsPoint | null {
   };
 }
 
-function buildRealtimeInstructions(routeId: string, state: JourneyState | undefined, language: GuideLanguage): string {
-  const context = buildGuideContext(routeId, state, language);
+function buildRealtimeInstructions(routeId: string, state: JourneyState | undefined, language: GuideLanguage, simulation?: TrainSimulationState): string {
+  const context = buildGuideContext(routeId, state, language, simulation);
   const languageRule =
     language === "en-US"
       ? "You must speak English. Do not switch to Chinese unless the user explicitly asks."
@@ -213,10 +218,10 @@ function buildRealtimeInstructions(routeId: string, state: JourneyState | undefi
   return [
     languageRule,
     context.taskBrief,
-    "你的任務不是閒聊助理，而是軌道伴遊 voice agent：根據 GPS 事件、目前站點、下一站、故事資料與 POI 推薦，主動產生短語音導覽。",
-    "每次主動導覽控制在 20 到 45 秒；使用者插話時，先回答問題，再自然接回旅程。",
+    "你的任務不是閒聊助理，而是專業軌道導遊：一段導覽要講到段落邊界，不要因使用者背景聲音立刻中斷。",
+    "使用者自然插話時，先把問題暫存；等目前段落結束，再回答或反問澄清。",
     "如果缺少即時營業狀態、班次或官方來源，不要編造；要說目前只有 MVP 種子資料。",
-    "收到 journey event 時，先判斷事件類型，再用 guide context 的故事與 POI 回答。",
+    "收到 guide segment prompt 時，只講指定段落，不要自己跳到下一段。",
     "必要時呼叫 get_guide_context、get_station_story 或 get_nearby_pois 補上下文。",
     `Guide context JSON:\n${JSON.stringify(context)}`
   ].join("\n");
@@ -233,7 +238,8 @@ function buildRealtimeTools() {
         properties: {
           journeyId: { type: "string" },
           routeId: { type: "string" },
-          language: { type: "string", enum: ["zh-TW", "en-US"] }
+          language: { type: "string", enum: ["zh-TW", "en-US"] },
+          simulation: { type: "object" }
         },
         required: ["journeyId"]
       }
@@ -285,14 +291,20 @@ function buildRealtimeTools() {
   ];
 }
 
-function buildGuideContext(routeId: string, state: JourneyState | undefined, language: GuideLanguage): GuideContext {
+function buildGuideContext(routeId: string, state: JourneyState | undefined, language: GuideLanguage, simulation?: TrainSimulationState): GuideContext {
   const route = getRoute(routeId) ?? null;
   const routeStations = getRouteStations(routeId);
-  const currentStation = findStation(state?.currentStationId);
-  const nextStation = findStation(state?.nextStationId);
-  const relevantStationIds = uniqueStrings([currentStation?.id, nextStation?.id, routeStations[0]?.id]);
+  const currentStation = findStation(simulation?.currentStationId ?? state?.currentStationId);
+  const nextStation = findStation(simulation?.nextStationId ?? state?.nextStationId);
+  const currentIndex = currentStation ? routeStations.findIndex((station) => station.id === currentStation.id) : 0;
+  const nearbyStationIds = [routeStations[currentIndex - 1]?.id, currentStation?.id, nextStation?.id, routeStations[currentIndex + 2]?.id];
+  const relevantStationIds = uniqueStrings([...nearbyStationIds, routeStations[0]?.id]);
   const relevantStories = relevantStationIds.map((stationId) => getStationStory(stationId)).filter(isStationStory);
   const relevantPois = relevantStationIds.flatMap((stationId) => getStationPois(stationId));
+  const guideScript = currentStation ? getStationGuideScript(currentStation.id) : undefined;
+  const localizedScript = guideScript ? (language === "en-US" ? guideScript.en : guideScript.zh) : undefined;
+  const currentGuideSegment =
+    localizedScript && simulation ? localizedScript.segments[simulation.stationNarrationIndex] : localizedScript?.segments[0];
   const taskBrief =
     language === "en-US"
       ? "AI Rail Guide turns a train ride into an immersive micro-trip. Act as a TRA cultural guide, explain what is outside the window, and suggest one optional stop only when context supports it."
@@ -305,6 +317,9 @@ function buildGuideContext(routeId: string, state: JourneyState | undefined, lan
     nextStation,
     relevantStories,
     relevantPois,
+    guideScript,
+    currentGuideSegment,
+    simulation,
     routeStationNames: routeStations.map((station) => station.name),
     taskBrief
   };
@@ -320,6 +335,13 @@ function uniqueStrings(values: Array<string | undefined>): string[] {
 
 function parseGuideLanguage(value: unknown): GuideLanguage {
   return value === "en-US" ? "en-US" : "zh-TW";
+}
+
+function parseSimulation(value: unknown): TrainSimulationState | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const simulation = value as Partial<TrainSimulationState>;
+  if (typeof simulation.currentStationId !== "string") return undefined;
+  return simulation as TrainSimulationState;
 }
 
 function isStationStory(value: StationStory | undefined): value is StationStory {
