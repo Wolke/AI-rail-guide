@@ -33,7 +33,9 @@ const copy = {
     progress: "列車進度",
     input: "也可以打字插話；系統會等導覽段落結束後處理",
     send: "送出",
-    language: "語言"
+    language: "語言",
+    textDebug: "文字 Debug",
+    voiceMode: "Realtime 語音"
   },
   "en-US": {
     title: "Pingxi Line Guided Train Simulation",
@@ -50,7 +52,9 @@ const copy = {
     progress: "Train progress",
     input: "Type a question; the guide will answer at the next segment boundary",
     send: "Send",
-    language: "Language"
+    language: "Language",
+    textDebug: "Text debug",
+    voiceMode: "Realtime voice"
   }
 };
 
@@ -58,6 +62,7 @@ export function App() {
   const [journey, setJourney] = useState<JourneyState | null>(null);
   const [tourState, setTourState] = useState<TourState>(() => createInitialTourState(routeId));
   const [voiceStatus, setVoiceStatus] = useState<VoiceStatus>("idle");
+  const [textDebugMode, setTextDebugMode] = useState(true);
   const [feed, setFeed] = useState<string[]>([
     "這版 Demo 會讓一台假列車沿平溪線行駛；AI 會把每站導覽講到段落邊界，再處理使用者問題。"
   ]);
@@ -66,6 +71,7 @@ export function App() {
   const realtime = useRef<RealtimeRailClient | null>(null);
   const tourStateRef = useRef(tourState);
   const voiceStatusRef = useRef(voiceStatus);
+  const textDebugModeRef = useRef(textDebugMode);
   const journeyRef = useRef(journey);
   const timers = useRef<{ travel?: number; fallback?: number; boundary?: number }>({});
   const routeStations = useMemo(() => getRouteStations(routeId), []);
@@ -79,6 +85,7 @@ export function App() {
   const segmentCount = localizedScript?.segments.length ?? 0;
   const trainLeft = computeTrainLeft(routeStations, tourState);
   const realtimeBlockedReason = getRealtimeBlockedReason();
+  const currentTourContext = buildTourContext(tourState);
 
   useEffect(() => {
     tourStateRef.current = tourState;
@@ -87,6 +94,10 @@ export function App() {
   useEffect(() => {
     voiceStatusRef.current = voiceStatus;
   }, [voiceStatus]);
+
+  useEffect(() => {
+    textDebugModeRef.current = textDebugMode;
+  }, [textDebugMode]);
 
   useEffect(() => {
     journeyRef.current = journey;
@@ -100,7 +111,7 @@ export function App() {
   }, []);
 
   const appendFeed = (message: string) => {
-    setFeed((items) => [message, ...items].slice(0, 14));
+    setFeed((items) => [message, ...items].slice(0, 30));
   };
 
   const dispatchTourEvent = (event: TourEvent) => {
@@ -120,7 +131,10 @@ export function App() {
     if (!activeJourney) return;
 
     appendFeed(language === "en-US" ? "The train simulation has started." : "列車模擬已開始。");
-    if (!realtime.current) {
+    if (textDebugModeRef.current) {
+      setVoiceStatus("fallback");
+      appendDebug("TEXT_MODE_START", buildTourContext(tourStateRef.current));
+    } else if (!realtime.current) {
       realtime.current = createRealtimeClient();
       await realtime.current.connect(activeJourney.journeyId, routeId, language);
       realtime.current.updateGuideTurnMode();
@@ -141,7 +155,7 @@ export function App() {
   const changeLanguage = async (value: GuideLanguage) => {
     setLanguageState(value === "en-US" ? "Applying" : "套用中");
     dispatchTourEvent({ type: "LANGUAGE_CHANGED", language: value });
-    if (journeyRef.current && realtime.current) {
+    if (journeyRef.current && realtime.current && !textDebugModeRef.current) {
       realtime.current.disconnect();
       realtime.current = createRealtimeClient();
       await realtime.current.connect(journeyRef.current.journeyId, routeId, value);
@@ -149,6 +163,28 @@ export function App() {
       realtime.current.syncContext(buildTourContext({ ...tourStateRef.current, language: value }));
     }
     setLanguageState(value === "en-US" ? "Applied" : "已套用");
+  };
+
+  const toggleTextDebugMode = async () => {
+    const next = !textDebugMode;
+    setTextDebugMode(next);
+    if (next) {
+      realtime.current?.disconnect();
+      realtime.current = null;
+      setVoiceStatus("fallback");
+      appendFeed(language === "en-US" ? "Text debug mode enabled. Realtime is disconnected." : "已切到文字 Debug 模式，Realtime 已斷線。");
+      appendDebug("TEXT_MODE_ON", buildTourContext(tourStateRef.current));
+      return;
+    }
+    appendFeed(language === "en-US" ? "Realtime voice mode enabled." : "已切到 Realtime 語音模式。");
+    if (journeyRef.current) {
+      realtime.current = createRealtimeClient();
+      await realtime.current.connect(journeyRef.current.journeyId, routeId, tourStateRef.current.language);
+      realtime.current.updateGuideTurnMode();
+      realtime.current.syncContext(buildTourContext(tourStateRef.current));
+    } else {
+      setVoiceStatus("idle");
+    }
   };
 
   const sendTypedQuestion = async () => {
@@ -199,24 +235,29 @@ export function App() {
           startTravelTimer();
           break;
         case "SYNC_CONTEXT":
-          realtime.current?.syncContext(command.context);
+          if (textDebugModeRef.current) appendDebug("SYNC_CONTEXT", command.context);
+          else realtime.current?.syncContext(command.context);
           break;
         case "CANCEL_RESPONSE":
-          realtime.current?.cancelResponse();
+          if (textDebugModeRef.current) appendDebug("CANCEL_RESPONSE", buildTourContext(state));
+          else realtime.current?.cancelResponse();
           break;
         case "MUTE_OUTPUT":
-          realtime.current?.muteOutput();
+          if (textDebugModeRef.current) appendDebug("MUTE_OUTPUT", buildTourContext(state));
+          else realtime.current?.muteOutput();
           break;
         case "RESUME_OUTPUT":
-          realtime.current?.resumeOutput();
+          if (textDebugModeRef.current) appendDebug("RESUME_OUTPUT", buildTourContext(state));
+          else realtime.current?.resumeOutput();
           break;
         case "SEND_GUIDE_SEGMENT":
+          appendDebug("SEND_GUIDE_SEGMENT", command.context, command.segmentLabel);
           appendFeed(
             command.context.language === "en-US"
               ? `Guide: ${command.segmentLabel}`
               : `導覽：${command.segmentLabel.replace(" ", " 第 ")} 段`
           );
-          if (voiceStatusRef.current === "connected") {
+          if (!textDebugModeRef.current && voiceStatusRef.current === "connected") {
             realtime.current?.sendGuideSegment(command.context, command.segmentText, command.segmentLabel, command.responseId);
           } else {
             appendFeed(`AI：${command.segmentText}`);
@@ -224,7 +265,8 @@ export function App() {
           }
           break;
         case "ANSWER_PENDING_QUESTION":
-          if (voiceStatusRef.current === "connected") {
+          appendDebug("ANSWER_PENDING_QUESTION", command.context, command.question);
+          if (!textDebugModeRef.current && voiceStatusRef.current === "connected") {
             realtime.current?.answerQuestion(command.context, command.question, command.responseId);
           } else {
             void sendFallbackChat({
@@ -240,7 +282,8 @@ export function App() {
           }
           break;
         case "ASK_QUESTION_CLARIFICATION":
-          if (voiceStatusRef.current === "connected") {
+          appendDebug("ASK_QUESTION_CLARIFICATION", command.context, command.question);
+          if (!textDebugModeRef.current && voiceStatusRef.current === "connected") {
             realtime.current?.askQuestionClarification(command.context, command.question, command.responseId);
           } else {
             appendFeed(command.context.language === "en-US" ? "AI: Which part would you like to ask about?" : "AI：你剛剛想問的是哪一個部分？");
@@ -293,6 +336,20 @@ export function App() {
     });
   }
 
+  function appendDebug(label: string, context: ReturnType<typeof buildTourContext>, detail?: string) {
+    const message = [
+      `[Debug] ${label}`,
+      `current=${context.currentStationName}(${context.currentStationId})`,
+      `next=${context.nextStationName ?? "none"}(${context.nextStationId ?? "none"})`,
+      `phase=${context.phase}`,
+      `segment=${context.guideSegmentIndex + 1}`,
+      detail ? `detail=${detail}` : ""
+    ]
+      .filter(Boolean)
+      .join(" | ");
+    appendFeed(message);
+  }
+
   return (
     <main className="app-shell">
       <section className="topbar">
@@ -308,6 +365,9 @@ export function App() {
               <option value="en-US">English</option>
             </select>
           </label>
+          <button className={textDebugMode ? "debug-toggle active" : "debug-toggle"} onClick={() => void toggleTextDebugMode()}>
+            {textDebugMode ? c.textDebug : c.voiceMode}
+          </button>
           <div className={`status status-${voiceStatus}`}>{voiceStatusLabel(voiceStatus, language)}</div>
         </div>
       </section>
@@ -373,6 +433,11 @@ export function App() {
           <p className="eyebrow">Pending Question</p>
           <h2>{pendingLabel(tourState.pendingQuestion.status, language)}</h2>
           <p>{tourState.pendingQuestion.text || (language === "en-US" ? "No passenger question is waiting." : "目前沒有等待處理的旅客問題。")}</p>
+        </div>
+        <div className="story-panel debug-panel">
+          <p className="eyebrow">Tour Debug</p>
+          <h2>{textDebugMode ? "文字模式" : "Realtime 模式"}</h2>
+          <pre>{JSON.stringify(currentTourContext, null, 2)}</pre>
         </div>
       </section>
 

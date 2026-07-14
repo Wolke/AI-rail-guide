@@ -102,6 +102,21 @@ h2 {
   font-weight: 800;
 }
 
+.debug-toggle {
+  min-height: 38px;
+  border: 1px solid rgba(18, 49, 43, 0.18);
+  border-radius: 8px;
+  padding: 0 12px;
+  color: #12312b;
+  background: #fffdf7;
+  font-weight: 800;
+}
+
+.debug-toggle.active {
+  color: #fffdf7;
+  background: #12312b;
+}
+
 .status-connected {
   background: #1c7c54;
 }
@@ -117,7 +132,7 @@ h2 {
 
 .dashboard {
   display: grid;
-  grid-template-columns: minmax(0, 1.2fr) minmax(280px, 0.8fr);
+  grid-template-columns: minmax(0, 1.2fr) minmax(260px, 0.8fr) minmax(280px, 0.9fr);
   gap: 18px;
 }
 
@@ -238,6 +253,18 @@ h2 {
   border: 1px solid rgba(18, 49, 43, 0.16);
   border-radius: 8px;
   background: #fffdf7;
+}
+
+.debug-panel pre {
+  max-height: 220px;
+  overflow: auto;
+  border-radius: 8px;
+  padding: 12px;
+  color: #12312b;
+  background: #f3efe3;
+  font-size: 0.78rem;
+  line-height: 1.4;
+  white-space: pre-wrap;
 }
 
 .journey-panel,
