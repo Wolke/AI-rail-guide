@@ -1,45 +1,30 @@
-# AI Rail Guide
+# AI-rail-voice CLI
 
-PWA MVP for a dynamic AI rail companion. The first route is a TRA Pingxi Line demo using foreground GPS, OpenAI Realtime voice, and static seed content.
+A macOS-first diagnostic CLI for OpenAI Realtime rail-voice sessions. It keeps one revisioned journey context, traces every protocol event, and supports text, microphone input, streamed speaker output, manual station changes, and reproducible scenarios.
 
-## Features
+## Requirements
 
-- React + TypeScript + Vite PWA.
-- Foreground GPS tracking with `navigator.geolocation.watchPosition()`.
-- OpenAI Realtime WebRTC voice session through a protected backend-created client secret.
-- Text fallback when no OpenAI key, microphone permission, or WebRTC connection is available.
-- Static route, station, story, and POI seed data for the Pingxi Line.
-- IndexedDB persistence for the latest journey state.
-
-## Setup
+- Node.js 22 or newer
+- macOS with Xcode Command Line Tools (`swiftc`)
+- `OPENAI_API_KEY`
 
 ```bash
 npm install
 cp .env.example .env
+npm run audio:build
+npm start
 ```
 
-Set `OPENAI_API_KEY` in `.env` for Realtime voice. Without it, the app still runs in text fallback mode.
-
-## Development
-
-```bash
-npm run dev
-```
-
-- Client: http://localhost:5173
-- API: http://localhost:8787
-
-GPS and microphone APIs work on `localhost` during development. For device testing, serve the app over HTTPS.
+The CLI stays usable in text mode if the audio helper is not built or microphone permission is denied. Type `/help` for commands. JSONL traces are written under `traces/` by default.
 
 ## Verification
 
 ```bash
-npm run test
+npm test
 npm run build
+npm run audio:build
 ```
 
-## MVP Constraints
+Live tests consume API quota and only run explicitly with `npm run smoke:live`.
 
-- Background GPS is not a PWA acceptance target.
-- PTX timetable integration is intentionally deferred.
-- Seed stories are placeholders and should be replaced with verified editorial sources before production.
+Station stories remain placeholder seed content and require verified editorial sources before production.
