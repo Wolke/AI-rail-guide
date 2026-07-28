@@ -9,13 +9,12 @@ const temporaryPath = `${snapshotPath}.next`;
 const snapshot = JSON.parse(await readFile(snapshotPath, "utf8"));
 const configuredSources = [
   { key: "RAIL_STATIONS_URL", publisher: "國營臺灣鐵路股份有限公司", kind: "stations" },
-  { key: "RAIL_TIMETABLE_URL", publisher: "交通部運輸資料流通服務平臺", kind: "timetable" },
   { key: "RAIL_TOURISM_URL", publisher: "交通部觀光署／新北市政府觀光旅遊局", kind: "tourism" }
 ].filter((source) => process.env[source.key]);
 
 if (configuredSources.length === 0) {
   validate(snapshot);
-  process.stdout.write("Snapshot is valid. Set RAIL_STATIONS_URL, RAIL_TIMETABLE_URL, or RAIL_TOURISM_URL to refresh official data.\n");
+  process.stdout.write("Snapshot is valid. Set RAIL_STATIONS_URL or RAIL_TOURISM_URL to refresh official data.\n");
   process.exit(0);
 }
 

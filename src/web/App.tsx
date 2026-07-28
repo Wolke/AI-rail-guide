@@ -142,7 +142,7 @@ export function App() {
             <span className="recommend-icon" aria-hidden="true">↗</span>
             <div><small>下車探索</small><strong>{info.poi?.name ?? `${info.current?.name}站周邊`}</strong><p>{info.poi?.pitchLine ?? "用二十分鐘，讀一段地方生活史。"}</p></div>
           </article>
-          <div className="data-note"><span>i</span><p><strong>示範內容</strong>定位與列車進度為模擬資料；文史內容正式上線前將完成來源查證。</p></div>
+          <div className="data-note"><span>i</span><p><strong>示範內容</strong>定位與列車進度為模擬資料；文史內容正式上線前將完成來源查證。{!runtime.realtimeAvailable && "OpenAI Realtime 即時對話僅於本機開發環境提供，此網頁版使用瀏覽器語音模擬。"}</p></div>
         </aside>
       </main>
       <footer><span>平溪線示範旅程</span><span>位置感知 · 雙向語音 · 可續接導覽</span></footer>
