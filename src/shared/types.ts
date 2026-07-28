@@ -45,6 +45,27 @@ export interface StationStory {
   theme: string;
   summary: string;
   sourceNote: string;
+  sources?: ContentSource[];
+  reviewStatus?: EditorialReviewStatus;
+  reviewedAt?: string;
+}
+
+export type EditorialReviewStatus = "draft" | "approved_for_demo" | "approved";
+
+export interface ContentSource {
+  publisher: string;
+  sourceUrl: string;
+  retrievedAt: string;
+  sourceUpdatedAt?: string;
+}
+
+export interface RailContentSnapshot {
+  schemaVersion: 1;
+  route: Route;
+  stations: Station[];
+  stories: StationStory[];
+  pois: Poi[];
+  sources: ContentSource[];
 }
 
 export interface LocalizedGuideText {
