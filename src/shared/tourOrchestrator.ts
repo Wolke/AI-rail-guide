@@ -36,6 +36,7 @@ export type TourEvent =
   | { type: "START" }
   | { type: "PAUSE" }
   | { type: "RESUME" }
+  | { type: "PREVIOUS_STATION" }
   | { type: "SKIP_TO_NEXT_STATION" }
   | { type: "TRAVEL_TICK"; deltaMs: number }
   | { type: "GUIDE_RESPONSE_DONE"; responseId?: string }
@@ -137,6 +138,9 @@ export function reduceTourEvent(state: TourState, event: TourEvent, now = Date.n
 
     case "SKIP_TO_NEXT_STATION":
       return skipToNextStation(state);
+
+    case "PREVIOUS_STATION":
+      return moveToPreviousStation(state);
 
     case "TRAVEL_TICK": {
       if (state.phase !== "traveling") return withCommands(state, []);
@@ -346,6 +350,32 @@ function skipToNextStation(state: TourState): TourTransition {
     { type: "RESUME_OUTPUT" },
     { type: "SYNC_CONTEXT", context: buildTourContext(next) },
     ...(next.phase === "traveling" ? [{ type: "START_TRAVEL_TIMER" } as TourCommand] : [])
+  ]);
+}
+
+function moveToPreviousStation(state: TourState): TourTransition {
+  const routeStations = getRouteStations(state.routeId);
+  const currentIndex = routeStations.findIndex((station) => station.id === state.currentStationId);
+  if (currentIndex <= 0) return withCommands(state, []);
+  const previous = routeStations[currentIndex - 1];
+  const next: TourState = {
+    ...state,
+    phase: "narrating",
+    currentStationId: previous.id,
+    nextStationId: routeStations[currentIndex]?.id,
+    travelProgress: 0,
+    guideSegmentIndex: 0,
+    activeResponseId: undefined,
+    activeResponseKind: undefined,
+    activeResponseStartedAt: undefined,
+    pendingQuestion: emptyPendingQuestion(),
+    pausedFrom: undefined
+  };
+  return startGuideSegment(next, Date.now(), [
+    { type: "CANCEL_RESPONSE" },
+    { type: "CLEAR_TIMERS" },
+    { type: "RESUME_OUTPUT" },
+    { type: "SYNC_CONTEXT", context: buildTourContext(next) }
   ]);
 }
 

@@ -47,6 +47,17 @@ describe("tour orchestrator", () => {
     expect(transition.state.travelProgress).toBe(0);
   });
 
+  it("moves to the previous station and starts its guide", () => {
+    const traveling = reduceTourEvent(createInitialTourState("tra-pingxi"), { type: "START" }, 1_000).state;
+    const atHoutong = reduceTourEvent(traveling, { type: "SKIP_TO_NEXT_STATION" }, 2_000).state;
+    const transition = reduceTourEvent(atHoutong, { type: "PREVIOUS_STATION" }, 3_000);
+
+    expect(transition.state.currentStationId).toBe("ruifang");
+    expect(transition.state.nextStationId).toBe("houtong");
+    expect(transition.state.phase).toBe("narrating");
+    expect(transition.commands.some((command) => command.type === "SEND_GUIDE_SEGMENT")).toBe(true);
+  });
+
   it("ignores stale guide response done events", () => {
     const started = reduceTourEvent(createInitialTourState("tra-pingxi", "zh-TW", true), { type: "START" }, 1_000).state;
     const narrating = reduceTourEvent(started, { type: "TRAVEL_TICK", deltaMs: 8_000 }, 2_000).state;

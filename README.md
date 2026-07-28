@@ -28,3 +28,15 @@ npm run audio:build
 Live tests consume API quota and only run explicitly with `npm run smoke:live`.
 
 Station stories remain placeholder seed content and require verified editorial sources before production.
+
+## Web demo
+
+The mobile-first RailTalk demo reuses the same Pingxi Line data and tour state machine. It runs entirely in the browser with simulated train progress, speech synthesis, optional browser speech recognition, and preset-question fallback.
+
+```bash
+npm run web:dev
+npm run web:test
+npm run web:build
+```
+
+The production bundle is written to `dist-web/`. GPS, train position, and editorial content are explicitly presented as demo data; no API key is sent to the browser.
